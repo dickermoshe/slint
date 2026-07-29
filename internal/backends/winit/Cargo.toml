@@ -53,6 +53,7 @@ renderer-software = [
   "dep:rgb",
   "dep:i-slint-renderer-software",
   "i-slint-renderer-software/std",
+  "i-slint-renderer-software/systemfonts",
   "dep:bytemuck",
 ]
 accessibility = ["dep:accesskit", "dep:accesskit_winit"]

@@ -1,0 +1,87 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+//ignore: skia
+//SIZE=480x360
+
+import "../../fonts/NotoSansArabic-Variable.ttf";
+import "../../fonts/NotoSansHebrew-Variable.ttf";
+import "../../fonts/NotoSansDevanagari-Variable.ttf";
+
+export component TestCase inherits Window {
+    background: white;
+    width: 480px;
+    height: 360px;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+
+        Text {
+            font-family: "Noto Sans Arabic";
+            font-size: 28px;
+            font-weight: 650;
+            color: #18212b;
+            horizontal-alignment: start;
+            text: "السَّلَامُ عَلَيْكُمْ — Slint ١٢٣";
+        }
+
+        Text {
+            font-family: "Noto Sans Hebrew";
+            font-size: 25px;
+            color: #263f63;
+            horizontal-alignment: start;
+            text: "שָׁלוֹם Slint 123 — מִמָּשָׁק";
+        }
+
+        Text {
+            font-family: "Noto Sans Devanagari";
+            font-size: 24px;
+            color: #694028;
+            text: "नमस्ते Slint — क्षितिज";
+        }
+
+        Rectangle {
+            height: 72px;
+            border-width: 1px;
+            border-color: #9aa7b3;
+
+            Text {
+                width: parent.width;
+                height: parent.height;
+                font-family: "Noto Sans Arabic";
+                font-size: 22px;
+                color: #18212b;
+                wrap: word-wrap;
+                overflow: elide;
+                max-lines: 2;
+                horizontal-alignment: start;
+                text: "هذا نص عربي طويل مع Latin 123 وعلامات تَشْكِيل لاختبار الالتفاف والحذف";
+            }
+        }
+
+        Rectangle {
+            height: 38px;
+            border-width: 1px;
+            border-color: #9aa7b3;
+
+            Text {
+                width: 210px;
+                height: parent.height;
+                font-family: "Noto Sans Hebrew";
+                font-size: 22px;
+                color: #263f63;
+                overflow: elide;
+                horizontal-alignment: right;
+                text: "טקסט ארוך מאוד עם 123 ו-Latin";
+            }
+        }
+
+        StyledText {
+            default-font-family: "Noto Sans Hebrew";
+            default-font-size: 20px;
+            default-color: #18212b;
+            text: @markdown("**עברית** and *Latin* בתוך משפט");
+        }
+    }
+}

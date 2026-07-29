@@ -28,6 +28,8 @@ default = [
   "accessibility",
   "compat-1-2",
   "system-tray",
+  "locale-decimal-separator",
+  "unicode-normalization",
 ]
 
 ## Mandatory feature:
@@ -40,6 +42,11 @@ default = [
 
 ## Enable use of the Rust standard library.
 std = ["i-slint-core/std", "i-slint-renderer-software?/std"]
+
+# Keep locale-aware number formatting and NFC key normalization in the default desktop build.
+# Custom embedded platforms can omit these features to avoid ICU's compiled data.
+locale-decimal-separator = ["i-slint-core/locale-decimal-separator"]
+unicode-normalization = ["i-slint-core/unicode-normalization"]
 
 ## Enable the translations using [gettext](https://www.gnu.org/software/gettext/gettext)
 ##
@@ -61,8 +68,9 @@ log = ["i-slint-core/log"]
 ## such as `SharedString` and `SharedVector`.
 serde = ["i-slint-core/serde"]
 
-# Deprecated feature, this is now automatically enabled when the `renderer-software` and `std` features are enabled
-software-renderer-systemfonts = ["renderer-software"]
+# Desktop backends enable this automatically. Custom platforms can use it when hosted-font
+# discovery is appropriate.
+software-renderer-systemfonts = ["renderer-software", "i-slint-renderer-software/systemfonts"]
 
 # Enable support for Path element rendering with the software renderer. This is implicitly enabled by the
 # `std` feature, but can be enabled without `std` if you want to use the software renderer in a `#![no_std]` environment and need support for Path elements.
@@ -205,7 +213,21 @@ renderer-skia-opengl = ["i-slint-backend-selector/renderer-skia-opengl", "dep:i-
 renderer-skia-vulkan = ["i-slint-backend-selector/renderer-skia-vulkan", "dep:i-slint-renderer-skia", "std"]
 
 ## Render using the software renderer.
-renderer-software = ["i-slint-backend-selector/renderer-software", "dep:i-slint-renderer-software"]
+renderer-software = [
+  "i-slint-backend-selector/renderer-software",
+  "dep:i-slint-renderer-software",
+  "i-slint-renderer-software/swash-rasterizer",
+]
+
+## Render software text using static TrueType outlines on flash-constrained embedded targets.
+##
+## This profile keeps Parley shaping, bidi, wrapping, and layout, but omits Swash rasterization.
+## Imported fonts must use static `glyf` outlines.
+renderer-software-embedded-ttf-only = [
+  "i-slint-backend-selector/renderer-software",
+  "dep:i-slint-renderer-software",
+  "i-slint-renderer-software/embedded-ttf-only",
+]
 
 ## KMS with Vulkan or EGL and libinput on Linux are used to render the application in full screen mode, without any
 ## windowing system. Requires libseat. If you don't have libseat, select `backend-linuxkms-noseat` instead.

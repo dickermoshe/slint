@@ -16,24 +16,36 @@ version.workspace = true
 path = "lib.rs"
 
 [features]
-systemfonts = [
+text-engine = [
   "i-slint-core/shared-fontique",
   "i-slint-common/shared-fontique",
   "dep:skrifa",
-  "dep:swash",
   "i-slint-core/shared-parley",
-  "i-slint-core/shared-swash",
-  "std",
   "dep:clru",
 ]
+swash-rasterizer = ["text-engine", "dep:swash", "i-slint-core/shared-swash"]
+# Restricts embedded rendering to static TrueType outlines. Shaping remains OpenType based.
+embedded-ttf-only = ["text-engine", "dep:ttf-parser", "dep:zeno"]
+systemfonts = [
+  "swash-rasterizer",
+  "i-slint-core/system-fonts",
+  "i-slint-common/system-fonts",
+]
 path = ["dep:zeno", "dep:lyon_path", "i-slint-core/path"]
-std = ["zeno?/std", "num-traits/std", "euclid/std", "i-slint-core/std", "path", "systemfonts", "swash?/std"]
+std = [
+  "zeno?/std",
+  "num-traits/std",
+  "euclid/std",
+  "i-slint-core/std",
+  "path",
+  "swash?/std",
+]
 libm = ["zeno?/libm", "num-traits/libm", "euclid/libm", "i-slint-core/libm", "swash?/libm"]
 
 experimental = []
 # Exposes additional APIS that aren't public but required for integration testing.
 testing = ["i-slint-core/testing"]
-default = ["std"]
+default = ["std", "swash-rasterizer"]
 
 [dependencies]
 i-slint-core = { workspace = true }
@@ -46,6 +58,7 @@ integer-sqrt = { version = "0.1.5" }
 num-traits = { version = "0.2", default-features = false }
 skrifa = { workspace = true, optional = true }
 swash = { workspace = true, optional = true, features = ["scale", "render"] }
+ttf-parser = { version = "0.25", optional = true, default-features = false, features = ["std"] }
 zeno = { version = "0.3.3", optional = true, default-features = false, features = ["eval"] }
 lyon_path = { workspace = true, optional = true }
 

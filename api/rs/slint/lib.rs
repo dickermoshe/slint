@@ -476,10 +476,10 @@ pub mod platform {
         pub use i_slint_renderer_skia::SkiaWGPURenderer;
     }
 
-    #[cfg(feature = "renderer-software")]
+    #[cfg(any(feature = "renderer-software", feature = "renderer-software-embedded-ttf-only"))]
     /// This module contains the [`software_renderer::SoftwareRenderer`] and related types.
     ///
-    /// It is only enabled when the `renderer-software` Slint feature is enabled.
+    /// Enable it with a software-renderer Slint feature.
     pub mod software_renderer {
         pub use i_slint_renderer_software::*;
     }

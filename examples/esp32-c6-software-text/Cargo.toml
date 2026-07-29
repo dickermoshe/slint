@@ -1,0 +1,46 @@
+# Copyright © SixtyFPS GmbH <info@slint.dev>
+# SPDX-License-Identifier: MIT
+
+[workspace]
+resolver = "3"
+
+[package]
+name = "esp32-c6-software-text"
+version = "1.18.0"
+edition = "2024"
+license = "MIT"
+publish = false
+build = "build.rs"
+
+[dependencies]
+esp-idf-svc = "0.52.1"
+slint = { path = "../../api/rs/slint", default-features = false, features = [
+  "compat-1-2",
+  "renderer-software-embedded-ttf-only",
+  "std",
+] }
+
+[build-dependencies]
+embuild = "0.33"
+slint-build = { path = "../../api/rs/build", default-features = false, features = [
+  "compat-1-18",
+  "renderer-software-embedded-fonts",
+] }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+[profile.dev]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+debug = 0
+debug-assertions = false
+overflow-checks = false
+incremental = false
+panic = "abort"
+strip = "debuginfo"

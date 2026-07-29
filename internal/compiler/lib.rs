@@ -129,7 +129,7 @@ pub struct CompilerConfiguration {
     /// Indicate whether to embed resources such as images in the generated output or whether
     /// to retain references to the resources on the file system.
     pub embed_resources: EmbedResourcesKind,
-    /// Whether to use SDF when pre-rendering fonts.
+    /// Compatibility setting for the former SDF font encoder.
     #[cfg(all(feature = "renderer-software", feature = "sdf-fonts"))]
     pub use_sdf_fonts: bool,
     /// The compiler will look in these paths for components used in the file to compile.

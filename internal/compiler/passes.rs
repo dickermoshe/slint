@@ -283,8 +283,8 @@ pub async fn run_passes(
         }
     });
 
-    // The fonts (system + imported) used to embed glyphs and rasterize SVG text are
-    // shared between `embed_images` and `embed_glyphs`, so the system is scanned once.
+    // Share the imported and hosted font collection between font packaging and SVG text
+    // rasterization, so hosted discovery runs once.
     #[cfg(feature = "renderer-software")]
     let font_collection = (type_loader.compiler_config.embed_resources
         == crate::EmbedResourcesKind::EmbedTextures)
@@ -329,38 +329,15 @@ pub async fn run_passes(
     match type_loader.compiler_config.embed_resources {
         #[cfg(feature = "renderer-software")]
         crate::EmbedResourcesKind::EmbedTextures => {
-            let mut characters_seen = std::collections::HashSet::new();
-
-            let sf = type_loader.compiler_config.const_scale_factor.unwrap_or(1.) as f64;
-
-            // Include at least the default font sizes used in the MCU backend
-            let mut font_pixel_sizes = vec![(12. * sf) as i16];
-            use i_slint_common::sharedfontique::fontique;
-            let mut font_weights = vec![fontique::FontWeight::NORMAL.value() as u16];
-            doc.visit_all_used_components(|component| {
-                embed_glyphs::collect_font_sizes_used(component, sf, &mut font_pixel_sizes);
-                embed_glyphs::collect_font_weights_used(component, &mut font_weights);
-                embed_glyphs::scan_string_literals(component, &mut characters_seen);
-            });
-
-            // This is not perfect, as this includes translations that may not be used.
-            #[cfg(feature = "bundle-translations")]
-            if let Some(translation_builder) = doc.translation_builder.as_ref() {
-                translation_builder.collect_characters_seen(&mut characters_seen);
-            }
-
-            embed_glyphs::embed_glyphs(
+            embed_glyphs::embed_font_packages(
                 doc,
-                &type_loader.compiler_config,
-                font_pixel_sizes,
-                font_weights,
-                characters_seen,
                 font_collection.as_ref().expect("EmbedTextures builds the shared font collection"),
                 diag,
             );
         }
         _ => {
-            // Create font registration calls for custom fonts, unless we're embedding pre-rendered glyphs
+            // Create font registration calls for custom fonts unless the software-renderer
+            // package pass already generated them.
             collect_custom_fonts::collect_custom_fonts(
                 doc,
                 std::iter::once(&*doc).chain(type_loader.all_documents()),

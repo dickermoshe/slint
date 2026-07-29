@@ -4588,7 +4588,13 @@ fn compile_builtin_function_call(
                 let global_access = &ctx.generator_state.global_access;
                 let resource_id: usize = *resource_id as _;
                 let symbol = format_ident!("SLINT_EMBEDDED_RESOURCE_{}", resource_id);
-                quote!(#global_access.window_adapter_ref()?.renderer().register_font_from_memory(#symbol.into()).unwrap())
+                quote!(
+                    #global_access
+                        .window_adapter_ref()?
+                        .renderer()
+                        .register_font_from_memory(#symbol.into())
+                        .ok()
+                )
             } else {
                 panic!("internal error: invalid args to RegisterCustomFontByMemory {arguments:?}")
             }
@@ -5704,6 +5710,10 @@ fn generate_resources(doc: &Document) -> Vec<TokenStream> {
                     quote!(static #symbol: &'static [u8] = #data;)
                 }
                 crate::embedded_resources::EmbeddedResourcesKind::DataUriPayload(bytes, _) => {
+                    quote!(static #symbol: &'static [u8] = &[#(#bytes),*];)
+                }
+                #[cfg(feature = "renderer-software")]
+                crate::embedded_resources::EmbeddedResourcesKind::SoftwareRendererFontPackageData(bytes) => {
                     quote!(static #symbol: &'static [u8] = &[#(#bytes),*];)
                 }
                 #[cfg(feature = "renderer-software")]

@@ -7,9 +7,16 @@ pub use skrifa;
 #[cfg(feature = "svg-text")]
 pub mod svg;
 
+mod font_package;
+pub use font_package::{
+    SOFTWARE_FONT_PACKAGE_MAGIC, SOFTWARE_FONT_PACKAGE_VERSION, SoftwareFontAxis, SoftwareFontFace,
+    SoftwareFontPackage, SoftwareFontPackageError,
+};
+
 #[cfg(any(target_family = "wasm", target_os = "nto"))]
 use fontique::ScriptExt;
 
+#[cfg(feature = "system-fonts")]
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -17,15 +24,21 @@ use std::sync::Arc;
 /// When `shared` is true, the collection uses `Arc`-based internal sharing,
 /// so that clones share the underlying data and mutations are visible across clones.
 pub fn create_collection(shared: bool) -> Collection {
-    let mut collection =
-        fontique::Collection::new(fontique::CollectionOptions { shared, system_fonts: true });
+    let mut collection = fontique::Collection::new(fontique::CollectionOptions {
+        shared,
+        system_fonts: cfg!(feature = "system-fonts"),
+    });
+    #[cfg(feature = "system-fonts")]
     let mut source_cache =
         if shared { fontique::SourceCache::new_shared() } else { fontique::SourceCache::default() };
+    #[cfg(not(feature = "system-fonts"))]
+    let source_cache = fontique::SourceCache::default();
 
-    // Preserves insertion order — the primary (SLINT_DEFAULT_FONT) lands first, fallbacks
-    // (SLINT_FONT_PATH) follow. The runtime bitmap-font fallback and the compile-time
-    // bitmap-font emission both rely on this ordering rather than any later sort.
+    // Preserve insertion order: the primary `SLINT_DEFAULT_FONT` comes first and
+    // `SLINT_FONT_PATH` fallbacks follow. Font packaging and runtime fallback use this order.
+    #[allow(unused_mut)]
     let mut default_fonts: Vec<(std::path::PathBuf, fontique::QueryFont)> = Vec::new();
+    #[allow(unused_mut)]
     let mut chain_families: Vec<fontique::FamilyId> = Vec::new();
 
     #[cfg(any(target_family = "wasm", target_os = "nto"))]
@@ -50,7 +63,9 @@ pub fn create_collection(shared: bool) -> Collection {
         }
     }
 
+    #[cfg(feature = "system-fonts")]
     let mut registered_paths: HashSet<std::path::PathBuf> = HashSet::new();
+    #[cfg(feature = "system-fonts")]
     let mut register_path =
         |path: std::path::PathBuf,
          collection: &mut fontique::Collection,
@@ -79,6 +94,7 @@ pub fn create_collection(shared: bool) -> Collection {
         };
 
     // SLINT_DEFAULT_FONT: a single .ttf to act as the primary font.
+    #[cfg(feature = "system-fonts")]
     if let Some(path) = std::env::var_os("SLINT_DEFAULT_FONT") {
         register_path(
             path.into(),
@@ -92,6 +108,7 @@ pub fn create_collection(shared: bool) -> Collection {
     // SLINT_FONT_PATH: OS-PATH-style list of additional fonts. Entries may be `.ttf`
     // files or directories (scanned non-recursively); everything found is appended to
     // the fallback chain after the primary.
+    #[cfg(feature = "system-fonts")]
     if let Some(path_list) = std::env::var_os("SLINT_FONT_PATH") {
         for entry in std::env::split_paths(&path_list) {
             if entry.is_file() {

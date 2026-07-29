@@ -599,7 +599,7 @@ pub(crate) mod ffi {
 fn normalize_key(key: &str) -> SharedString {
     let lowered = key.to_lowercase();
     cfg_if::cfg_if! {
-        if #[cfg(feature = "shared-parley")] {
+        if #[cfg(feature = "unicode-normalization")] {
             let normalizer = icu_normalizer::ComposingNormalizer::new_nfc();
             let normalized = normalizer.normalize(&lowered);
             SharedString::from(normalized.as_ref())

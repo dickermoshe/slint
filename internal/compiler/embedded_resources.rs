@@ -100,7 +100,10 @@ pub enum EmbeddedResourcesKind {
     /// The data has been processed in a texture
     #[cfg(feature = "renderer-software")]
     TextureData(Texture),
-    /// A set of pre-rendered glyphs of a TrueType font
+    /// A versioned package containing validated metadata and complete OpenType font data.
+    #[cfg(feature = "renderer-software")]
+    SoftwareRendererFontPackageData(Vec<u8>),
+    /// A set of pre-rendered glyphs used by the legacy no-std renderer.
     #[cfg(feature = "renderer-software")]
     BitmapFontData(BitmapFont),
 }

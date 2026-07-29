@@ -36,19 +36,6 @@ fn render(renderer: &SoftwareRenderer) {
 
 #[test]
 fn text_input_cursor_rect_does_not_recurse_into_font_context() {
-    // Force the buggy code path. The default (VectorFont, parley enabled) branch
-    // correctly drops the borrow before recursing; the (PixelFont, _) and
-    // (VectorFont, parley disabled) branches share the same hold-across-width()
-    // bug. The env var is the simplest way to drive the latter from a test that
-    // doesn't ship its own bitmap font. See `parley_disabled()` in the software
-    // renderer.
-    //
-    // SAFETY: this is the only test in this binary, so no other thread reads
-    // env vars concurrently.
-    unsafe {
-        std::env::set_var("SLINT_SOFTWARE_RENDERER_PARLEY_DISABLED", "1");
-    }
-
     let window = common::setup(WIDTH as u32, HEIGHT as u32);
 
     slint::slint! {

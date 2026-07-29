@@ -43,8 +43,7 @@ enum Embedding {
     /// used
     #[cfg(feature = "renderer-software")]
     EmbedForSoftwareRenderer,
-    /// Same as "embed-files-for-software-renderer" but use Signed Distance Field (SDF) to render fonts.
-    /// This produces smaller binaries, but may result in slightly inferior visual output and slower rendering.
+    /// Compatibility alias for "embed-for-software-renderer".
     #[cfg(all(feature = "renderer-software", feature = "sdf-fonts"))]
     EmbedForSoftwareRendererWithSdf,
 }

@@ -117,7 +117,7 @@ pub fn configure_test_fonts() {
                 shared: true,
                 system_fonts: false,
             });
-            font_context.source_cache = fontique::SourceCache::new_shared();
+            font_context.source_cache = fontique::SourceCache::default();
             font_context.clear_registered_static_fonts();
 
             let primary =

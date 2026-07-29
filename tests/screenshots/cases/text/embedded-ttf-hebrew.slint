@@ -1,0 +1,66 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+//ignore: skia
+//ignore: software
+//EMBEDDED_TTF_ONLY
+//SIZE=420x240
+
+import "../../../../examples/esp32-c6-software-text/fonts/NotoSansHebrew-ASCII-Embedded.ttf";
+
+export component TestCase inherits Window {
+    background: white;
+    width: 420px;
+    height: 240px;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+
+        Text {
+            font-family: "Noto Sans Hebrew";
+            font-size: 27px;
+            color: #172536;
+            horizontal-alignment: start;
+            text: "שָׁלוֹם Slint 123 — מִמָּשָׁק";
+        }
+
+        Text {
+            font-family: "Noto Sans Hebrew";
+            font-size: 24px;
+            font-weight: 700;
+            color: #3d2863;
+            horizontal-alignment: start;
+            text: "עברית מודגשת + ASCII";
+        }
+
+        Rectangle {
+            height: 72px;
+            border-width: 1px;
+            border-color: #9aa7b3;
+
+            Text {
+                width: parent.width;
+                height: parent.height;
+                font-family: "Noto Sans Hebrew";
+                font-size: 21px;
+                color: #172536;
+                wrap: word-wrap;
+                overflow: elide;
+                max-lines: 2;
+                horizontal-alignment: start;
+                text: "זהו טקסט עברי ארוך עם Latin 123 וסימני נִקּוּד לבדיקת גלישה וקיצור";
+            }
+        }
+
+        Text {
+            width: 245px;
+            font-family: "Noto Sans Hebrew";
+            font-size: 21px;
+            color: #175e55;
+            overflow: elide;
+            horizontal-alignment: end;
+            text: "טקסט ארוך מאוד עם 123 ו-ASCII";
+        }
+    }
+}

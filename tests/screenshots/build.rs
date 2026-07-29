@@ -21,7 +21,7 @@ fn main() -> std::io::Result<()> {
         Path::new(&std::env::var_os("OUT_DIR").unwrap()).join("generated.rs"),
     )?);
 
-    #[cfg(feature = "software")]
+    #[cfg(any(feature = "software", feature = "software-embedded-ttf-only"))]
     gen_software(&mut generated_file)?;
 
     #[cfg(feature = "skia")]
@@ -35,8 +35,8 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 
-// Renders every case with everything pre-rendered at compile time (`EmbedTextures`): bitmap fonts
-// and pre-decoded textures, the MCU-style path. Compares against (and creates) a single
+// Renders every case with compile-time packaged fonts and pre-decoded textures
+// (`EmbedTextures`), the MCU-style path. Compares against (and creates) a single
 // `references/software_embed_assets` reference per case.
 #[cfg(feature = "software-embed-assets")]
 fn gen_software_embed_assets(generated_file: &mut impl Write) -> std::io::Result<()> {
@@ -97,7 +97,7 @@ fn gen_software_embed_assets(generated_file: &mut impl Write) -> std::io::Result
     Ok(())
 }
 
-#[cfg(feature = "software")]
+#[cfg(any(feature = "software", feature = "software-embedded-ttf-only"))]
 fn generate_source(
     source: &str,
     output: &mut impl Write,
@@ -140,7 +140,7 @@ fn generate_source(
 }
 
 // Test parameters parsed from `KEY=value` / `KEY` markers in a case's source comments.
-#[cfg(feature = "software")]
+#[cfg(any(feature = "software", feature = "software-embedded-ttf-only"))]
 struct ScreenshotMarkers {
     scale_factor: Option<f32>,
     base_threshold: f32,
@@ -150,7 +150,7 @@ struct ScreenshotMarkers {
     skip_line_by_line: bool,
 }
 
-#[cfg(feature = "software")]
+#[cfg(any(feature = "software", feature = "software-embedded-ttf-only"))]
 fn parse_markers(source: &str, testcase: &test_driver_lib::TestCase) -> ScreenshotMarkers {
     // The `f32` value following `needle`, up to the next whitespace; `None` if the marker is
     // absent, panicking if it is present but malformed.
@@ -183,12 +183,13 @@ fn parse_markers(source: &str, testcase: &test_driver_lib::TestCase) -> Screensh
     }
 }
 
-// Which software driver a generated test belongs to. `EmbedAssets` (everything pre-rendered at
-// compile time) compares against and creates a single reference. `RuntimeAssets` (vector fonts plus
-// runtime-decoded images) compares against the `software/` reference if it exists, otherwise the
-// `software_embed_assets/` one, creating new references only under `software/`. All values are
+// Which software driver a generated test belongs to. `EmbedAssets` uses packaged fonts and
+// pre-decoded images, and compares against and creates one reference. `RuntimeAssets` uses
+// registered vector fonts and runtime-decoded images. It compares against the `software/`
+// reference if present, or the `software_embed_assets/` reference otherwise. All values are
 // quoted string literals.
-#[cfg(feature = "software")]
+#[cfg(any(feature = "software", feature = "software-embedded-ttf-only"))]
+#[allow(dead_code)]
 enum SoftwareDriver {
     EmbedAssets { reference: String },
     RuntimeAssets { primary: String, fallback: String },
@@ -196,7 +197,7 @@ enum SoftwareDriver {
 
 // Emits the `#[test]` body that renders the (already generated) `TestCase` with the software
 // renderer and compares it against the driver's reference(s).
-#[cfg(feature = "software")]
+#[cfg(any(feature = "software", feature = "software-embedded-ttf-only"))]
 fn write_software_test(
     output: &mut impl Write,
     markers: &ScreenshotMarkers,
@@ -288,15 +289,17 @@ fn skia_{identifier}() -> Result<(), Box<dyn std::error::Error>> {{
     Ok(())
 }
 
-// The default software driver: compiles every case with `EmbedAllResources`, so nothing is
-// pre-rendered at compile time. Fonts stay vector fonts (registered via `register_font_from_memory`
-// plus `configure_test_fonts()`, laid out with parley) and images are decoded at runtime. Cases
+// The default software driver compiles every case with `EmbedAllResources`. Fonts are registered
+// through `register_font_from_memory` plus `configure_test_fonts()`, laid out with Parley, and
+// rasterized on demand. Images are decoded at run time. Cases
 // excluded from the software renderer (`//ignore: software`) are skipped. Each case compares against
 // its `references/software` reference if one exists, otherwise the `references/software_embed_assets`
-// one, so a reference is only added where the runtime-decoded output differs from the pre-rendered
+// one, so a reference is only added where the run-time-decoded output differs from the packaged
 // output.
-#[cfg(feature = "software")]
+#[cfg(any(feature = "software", feature = "software-embedded-ttf-only"))]
 fn gen_software(generated_file: &mut impl Write) -> std::io::Result<()> {
+    let embedded_ttf_only =
+        cfg!(feature = "software-embedded-ttf-only") && !cfg!(feature = "software");
     let quoted_reference = |root: &str, testcase: &test_driver_lib::TestCase| {
         let path: std::path::PathBuf =
             [env!("CARGO_MANIFEST_DIR"), "references", root].iter().collect();
@@ -311,13 +314,24 @@ fn gen_software(generated_file: &mut impl Write) -> std::io::Result<()> {
     };
 
     for testcase in test_driver_lib::collect_test_cases("screenshots/cases")? {
-        if testcase.is_ignored("software") {
+        let source = std::fs::read_to_string(&testcase.absolute_path)?;
+        if embedded_ttf_only {
+            if !source.contains("EMBEDDED_TTF_ONLY") {
+                continue;
+            }
+        } else if testcase.is_ignored("software") {
             continue;
         }
-        let source = std::fs::read_to_string(&testcase.absolute_path)?;
 
-        let primary = quoted_reference("software", &testcase);
-        let fallback = quoted_reference("software_embed_assets", &testcase);
+        let (primary, fallback) = if embedded_ttf_only {
+            let reference = quoted_reference("software_embedded_ttf_only", &testcase);
+            (reference.clone(), reference)
+        } else {
+            (
+                quoted_reference("software", &testcase),
+                quoted_reference("software_embed_assets", &testcase),
+            )
+        };
 
         println!("cargo:rerun-if-changed={}", testcase.absolute_path.display());
         let module_name = testcase.identifier();

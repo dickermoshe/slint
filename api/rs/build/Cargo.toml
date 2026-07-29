@@ -29,10 +29,19 @@ default = ["compat-1-18", "renderer-software", "image-default-formats"]
 
 ## Enable embedding of images and fonts optimized for the software renderer.
 ## This enables the `i-slint-compiler/renderer-software` feature.
-renderer-software = ["i-slint-compiler/renderer-software", "dep:fontique"]
+renderer-software = [
+  "renderer-software-embedded-fonts",
+  "i-slint-compiler/renderer-software-system-fonts",
+  "dep:fontique",
+  "fontique/system",
+]
+## Enable software-renderer resource packaging using only imported application fonts.
+##
+## This avoids compiler-host font discovery and is suitable for reproducible embedded builds.
+renderer-software-embedded-fonts = ["i-slint-compiler/renderer-software"]
 ## Enable `image`'s default feature set (additional codecs).
 image-default-formats = ["i-slint-compiler/image-default-formats"]
-## Enable the [`CompilerConfiguration::with_sdf_fonts`] function that encodes the font's glyphs as scalable signed distance fields, to reduce the size.
+## Retain the compatibility-only [`CompilerConfiguration::with_sdf_fonts`] function.
 sdf-fonts = ["renderer-software", "i-slint-compiler/sdf-fonts"]
 ## Enable this feature when building `.slint` libraries.
 ## This feature is experimental and may change or be removed in the future,

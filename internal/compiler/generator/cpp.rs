@@ -1134,6 +1134,16 @@ fn embed_resource(
             }));
         }
         #[cfg(feature = "renderer-software")]
+        crate::embedded_resources::EmbeddedResourcesKind::SoftwareRendererFontPackageData(data) => {
+            declarations.push(Declaration::Var(Var {
+                ty: "const uint8_t".into(),
+                name: format_smolstr!("slint_embedded_resource_{}", resource_id),
+                array_size: Some(data.len()),
+                init: Some(expand_data_to_cpp_u8_array(data)),
+                ..Default::default()
+            }));
+        }
+        #[cfg(feature = "renderer-software")]
         crate::embedded_resources::EmbeddedResourcesKind::TextureData(
             crate::embedded_resources::Texture {
                 data,

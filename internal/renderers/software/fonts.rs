@@ -3,24 +3,33 @@
 
 // cSpell: ignore pixelfont vectorfont
 use alloc::rc::Rc;
+#[cfg(not(feature = "text-engine"))]
 use alloc::vec::Vec;
+#[cfg(not(feature = "text-engine"))]
 use core::cell::RefCell;
 
 use super::{Fixed, PhysicalLength, PhysicalSize};
-use i_slint_core::graphics::{BitmapFont, FontRequest};
+use i_slint_core::graphics::BitmapFont;
+#[cfg(not(feature = "text-engine"))]
+use i_slint_core::graphics::FontRequest;
+#[cfg(not(feature = "text-engine"))]
 use i_slint_core::lengths::ScaleFactor;
+#[cfg(not(feature = "text-engine"))]
 use i_slint_core::textlayout::TextLayout;
 
+#[cfg(not(feature = "text-engine"))]
 i_slint_core::thread_local! {
     static BITMAP_FONTS: RefCell<Vec<&'static BitmapFont>> = RefCell::default()
 }
 
+#[cfg(not(feature = "text-engine"))]
 #[derive(derive_more::From, Clone)]
 pub enum GlyphAlphaMap {
     Static(&'static [u8]),
     Shared(Rc<[u8]>),
 }
 
+#[cfg(not(feature = "text-engine"))]
 #[derive(Clone)]
 pub struct RenderableGlyph {
     pub x: Fixed<i32, 8>,
@@ -32,6 +41,7 @@ pub struct RenderableGlyph {
     pub sdf: bool,
 }
 
+#[cfg(not(feature = "text-engine"))]
 impl RenderableGlyph {
     pub fn size(&self) -> PhysicalSize {
         PhysicalSize::from_lengths(self.width, self.height)
@@ -39,10 +49,9 @@ impl RenderableGlyph {
 }
 
 // Subset of `RenderableGlyph`, specifically for VectorFonts.
-#[cfg(feature = "systemfonts")]
+#[cfg(feature = "text-engine")]
 #[derive(Clone)]
 pub struct RenderableVectorGlyph {
-    pub x: Fixed<i32, 8>,
     pub y: Fixed<i32, 8>,
     pub width: PhysicalLength,
     pub height: PhysicalLength,
@@ -51,13 +60,14 @@ pub struct RenderableVectorGlyph {
     pub glyph_origin_x: f32,
 }
 
-#[cfg(feature = "systemfonts")]
+#[cfg(feature = "text-engine")]
 impl RenderableVectorGlyph {
     pub fn size(&self) -> PhysicalSize {
         PhysicalSize::from_lengths(self.width, self.height)
     }
 }
 
+#[cfg(not(feature = "text-engine"))]
 pub trait GlyphRenderer {
     fn render_glyph(
         &self,
@@ -68,75 +78,63 @@ pub trait GlyphRenderer {
     fn scale_delta(&self) -> Fixed<u16, 8>;
 }
 
+#[cfg(not(feature = "text-engine"))]
 pub(super) use i_slint_core::textlayout::DEFAULT_FONT_SIZE;
 
+#[cfg(not(feature = "text-engine"))]
 mod pixelfont;
-#[cfg(feature = "systemfonts")]
+#[cfg(feature = "text-engine")]
 pub mod vectorfont;
 
-#[cfg(feature = "systemfonts")]
+#[cfg(feature = "text-engine")]
 pub mod systemfonts;
 
-#[derive(derive_more::From)]
+#[cfg(not(feature = "text-engine"))]
 pub enum Font {
     PixelFont(pixelfont::PixelFont),
-    #[cfg(feature = "systemfonts")]
-    VectorFont(vectorfont::VectorFont),
 }
 
+#[cfg(not(feature = "text-engine"))]
 /// Returns the size of the pre-rendered font in pixels.
 pub fn pixel_size(glyphs: &i_slint_core::graphics::BitmapGlyphs) -> PhysicalLength {
     PhysicalLength::new(glyphs.pixel_size)
 }
 
+#[cfg(not(feature = "text-engine"))]
 impl i_slint_core::textlayout::FontMetrics<PhysicalLength> for Font {
     fn ascent(&self) -> PhysicalLength {
         match self {
             Font::PixelFont(pixel_font) => pixel_font.ascent(),
-            #[cfg(feature = "systemfonts")]
-            Font::VectorFont(vector_font) => vector_font.ascent(),
         }
     }
 
     fn height(&self) -> PhysicalLength {
         match self {
             Font::PixelFont(pixel_font) => pixel_font.height(),
-            #[cfg(feature = "systemfonts")]
-            Font::VectorFont(vector_font) => vector_font.height(),
         }
     }
 
     fn descent(&self) -> PhysicalLength {
         match self {
             Font::PixelFont(pixel_font) => pixel_font.descent(),
-            #[cfg(feature = "systemfonts")]
-            Font::VectorFont(vector_font) => vector_font.descent(),
         }
     }
 
     fn x_height(&self) -> PhysicalLength {
         match self {
             Font::PixelFont(pixel_font) => pixel_font.x_height(),
-            #[cfg(feature = "systemfonts")]
-            Font::VectorFont(vector_font) => vector_font.x_height(),
         }
     }
 
     fn cap_height(&self) -> PhysicalLength {
         match self {
             Font::PixelFont(pixel_font) => pixel_font.cap_height(),
-            #[cfg(feature = "systemfonts")]
-            Font::VectorFont(vector_font) => vector_font.cap_height(),
         }
     }
 }
 
-pub fn match_font(
-    request: &FontRequest,
-    scale_factor: ScaleFactor,
-    #[cfg(feature = "systemfonts")]
-    font_context: &mut i_slint_core::textlayout::sharedparley::parley::FontContext,
-) -> Font {
+#[cfg(not(feature = "text-engine"))]
+pub fn match_font(request: &FontRequest, scale_factor: ScaleFactor) -> Font {
     let requested_weight = request
         .weight
         .and_then(|weight| weight.try_into().ok())
@@ -161,15 +159,6 @@ pub fn match_font(
     let font = match bitmap_font {
         Some(bitmap_font) => bitmap_font,
         None => {
-            #[cfg(feature = "systemfonts")]
-            if let Some(vectorfont) = systemfonts::match_font(
-                request,
-                scale_factor,
-                &mut font_context.collection,
-                &mut font_context.source_cache,
-            ) {
-                return vectorfont.into();
-            }
             if let Some(fallback_bitmap_font) = BITMAP_FONTS.with(|fonts| {
                 let fonts = fonts.borrow();
                 fonts
@@ -181,15 +170,6 @@ pub fn match_font(
             }) {
                 fallback_bitmap_font
             } else {
-                #[cfg(feature = "systemfonts")]
-                return systemfonts::fallbackfont(
-                    request,
-                    scale_factor,
-                    &mut font_context.collection,
-                    &mut font_context.source_cache,
-                )
-                .into();
-                #[cfg(not(feature = "systemfonts"))]
                 panic!(
                     "No font fallback found. The software renderer requires enabling the `EmbedForSoftwareRenderer` option when compiling slint files."
                 )
@@ -208,9 +188,10 @@ pub fn match_font(
 
     let pixel_size = if font.sdf { requested_pixel_size } else { pixel_size(matching_glyphs) };
 
-    pixelfont::PixelFont { bitmap_font: font, glyphs: matching_glyphs, pixel_size }.into()
+    Font::PixelFont(pixelfont::PixelFont { bitmap_font: font, glyphs: matching_glyphs, pixel_size })
 }
 
+#[cfg(not(feature = "text-engine"))]
 pub fn text_layout_for_font<'a, Font>(
     font: &'a Font,
     font_request: &FontRequest,
@@ -227,5 +208,8 @@ where
 }
 
 pub fn register_bitmap_font(font_data: &'static BitmapFont) {
-    BITMAP_FONTS.with(|fonts| fonts.borrow_mut().push(font_data))
+    #[cfg(not(feature = "text-engine"))]
+    BITMAP_FONTS.with(|fonts| fonts.borrow_mut().push(font_data));
+    #[cfg(feature = "text-engine")]
+    let _ = font_data;
 }

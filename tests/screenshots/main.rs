@@ -4,7 +4,10 @@
 #[cfg(test)]
 pub mod testing;
 
-#[cfg(all(test, feature = "software"))]
+#[cfg(all(
+    test,
+    any(feature = "software", feature = "software-embedded-ttf-only")
+))]
 pub mod software;
 
 #[cfg(all(test, feature = "skia"))]

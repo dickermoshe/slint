@@ -23,6 +23,7 @@ mod minimal_software_window;
 mod path;
 mod scene;
 
+#[cfg(not(feature = "text-engine"))]
 use self::fonts::GlyphRenderer;
 pub use self::minimal_software_window::MinimalSoftwareWindow;
 use self::scene::*;
@@ -35,20 +36,23 @@ use fixed::Fixed;
 use i_slint_core::api::PlatformError;
 use i_slint_core::graphics::rendering_metrics_collector::{RefreshMode, RenderingMetricsCollector};
 use i_slint_core::graphics::{BorderRadius, Rgba8Pixel, SharedImageBuffer, SharedPixelBuffer};
-use i_slint_core::item_rendering::HasFont;
 use i_slint_core::item_rendering::{
-    CachedRenderingData, ItemRenderer, PlainOrStyledText, RenderBorderRectangle, RenderImage,
-    RenderRectangle,
+    CachedRenderingData, ItemRenderer, RenderBorderRectangle, RenderImage, RenderRectangle,
 };
+#[cfg(not(feature = "text-engine"))]
+use i_slint_core::item_rendering::{HasFont as _, PlainOrStyledText};
 use i_slint_core::item_tree::ItemTreeWeak;
-use i_slint_core::items::{ItemRc, TextOverflow, TextWrap};
+#[cfg(not(feature = "text-engine"))]
+use i_slint_core::items::TextOverflow;
+use i_slint_core::items::{ItemRc, TextWrap};
 use i_slint_core::lengths::{
     LogicalBorderRadius, LogicalLength, LogicalPoint, LogicalRect, LogicalSize, LogicalVector,
     PhysicalPx, PointLengths, RectLengths, ScaleFactor, SizeLengths,
 };
 use i_slint_core::partial_renderer::{DirtyRegion, PartialRenderingState};
 use i_slint_core::renderer::RendererSealed;
-use i_slint_core::textlayout::{AbstractFont, FontMetrics, TextParagraphLayout};
+#[cfg(not(feature = "text-engine"))]
+use i_slint_core::textlayout::{AbstractFont, FontMetrics as _, TextParagraphLayout};
 use i_slint_core::window::{WindowAdapter, WindowInner};
 use i_slint_core::{Brush, Color, ImageInner, StaticTextures};
 #[allow(unused)]
@@ -445,8 +449,10 @@ pub struct SoftwareRenderer {
     maybe_window_adapter: RefCell<Option<Weak<dyn i_slint_core::window::WindowAdapter>>>,
     rotation: Cell<RenderingRotation>,
     rendering_metrics_collector: Option<Rc<RenderingMetricsCollector>>,
-    #[cfg(feature = "systemfonts")]
+    #[cfg(feature = "text-engine")]
     text_layout_cache: sharedparley::TextLayoutCache,
+    #[cfg(feature = "text-engine")]
+    glyph_cache: RefCell<fonts::vectorfont::GlyphCache>,
 }
 
 impl Default for SoftwareRenderer {
@@ -458,8 +464,10 @@ impl Default for SoftwareRenderer {
             rotation: Default::default(),
             rendering_metrics_collector: RenderingMetricsCollector::new("software"),
             repaint_buffer_type: Default::default(),
-            #[cfg(feature = "systemfonts")]
+            #[cfg(feature = "text-engine")]
             text_layout_cache: Default::default(),
+            #[cfg(feature = "text-engine")]
+            glyph_cache: RefCell::new(fonts::vectorfont::new_glyph_cache()),
         }
     }
 }
@@ -564,7 +572,7 @@ impl SoftwareRenderer {
             return Default::default();
         };
         let window_inner = WindowInner::from_pub(window.window());
-        #[cfg(feature = "systemfonts")]
+        #[cfg(feature = "text-engine")]
         self.text_layout_cache.clear_cache_if_scale_factor_changed(window.window());
         let factor = ScaleFactor::new(window_inner.scale_factor());
         let rotation = self.rotation.get();
@@ -611,8 +619,10 @@ impl SoftwareRenderer {
                 scale_factor: factor,
             },
             rotation,
-            #[cfg(feature = "systemfonts")]
+            #[cfg(feature = "text-engine")]
             &self.text_layout_cache,
+            #[cfg(feature = "text-engine")]
+            &self.glyph_cache,
         );
         let mut renderer = self.partial_rendering_state.create_partial_renderer(buffer_renderer);
         let window_adapter = renderer.window_adapter.clone();
@@ -761,7 +771,7 @@ impl SoftwareRenderer {
             return Default::default();
         };
         let window_inner = WindowInner::from_pub(window.window());
-        #[cfg(feature = "systemfonts")]
+        #[cfg(feature = "text-engine")]
         self.text_layout_cache.clear_cache_if_scale_factor_changed(window.window());
         let component_rc = window_inner.component();
         let component = i_slint_core::item_tree::ItemTreeRc::borrow_pin(&component_rc);
@@ -794,31 +804,8 @@ impl RendererSealed for SoftwareRenderer {
         max_width: Option<LogicalLength>,
         text_wrap: TextWrap,
     ) -> LogicalSize {
-        let Some(scale_factor) = self.scale_factor() else {
-            return LogicalSize::default();
-        };
-        let font_request = text_item.font_request(item_rc);
-        // Evaluate text() before borrowing font_context: the binding can
-        // re-enter text_size for other elements and would panic on a second
-        // borrow_mut().
-        let content = text_item.text();
-        #[cfg(feature = "systemfonts")]
-        let Some(slint_ctx) = self.slint_context() else {
-            return Default::default();
-        };
-        let font = {
-            #[cfg(feature = "systemfonts")]
-            let mut font_ctx = slint_ctx.font_context().borrow_mut();
-            fonts::match_font(
-                &font_request,
-                scale_factor,
-                #[cfg(feature = "systemfonts")]
-                &mut font_ctx,
-            )
-        };
-
-        #[cfg(feature = "systemfonts")]
-        if matches!(font, fonts::Font::VectorFont(_)) && !parley_disabled() {
+        #[cfg(feature = "text-engine")]
+        {
             return sharedparley::text_size(
                 self,
                 text_item,
@@ -830,24 +817,27 @@ impl RendererSealed for SoftwareRenderer {
             .unwrap_or_default();
         }
 
+        #[cfg(not(feature = "text-engine"))]
+        let Some(scale_factor) = self.scale_factor() else {
+            return LogicalSize::default();
+        };
+        #[cfg(not(feature = "text-engine"))]
+        let font_request = text_item.font_request(item_rc);
+        #[cfg(not(feature = "text-engine"))]
+        let content = text_item.text();
+        #[cfg(not(feature = "text-engine"))]
+        let font = fonts::match_font(&font_request, scale_factor);
+        #[cfg(not(feature = "text-engine"))]
         let max_lines = text_item.line_limit();
+        #[cfg(not(feature = "text-engine"))]
         let string = match &content {
             PlainOrStyledText::Plain(string) => alloc::borrow::Cow::Borrowed(string.as_str()),
             PlainOrStyledText::Styled(styled_text) => {
                 i_slint_core::styled_text::get_raw_text(styled_text)
             }
         };
+        #[cfg(not(feature = "text-engine"))]
         let (longest_line_width, height) = match &font {
-            #[cfg(feature = "systemfonts")]
-            fonts::Font::VectorFont(vf) => {
-                let layout = fonts::text_layout_for_font(vf, &font_request, scale_factor);
-                layout.text_size(
-                    &string,
-                    max_width.map(|max_width| (max_width.cast() * scale_factor).cast()),
-                    text_wrap,
-                    max_lines,
-                )
-            }
             fonts::Font::PixelFont(pf) => {
                 let layout = fonts::text_layout_for_font(pf, &font_request, scale_factor);
                 layout.text_size(
@@ -858,6 +848,7 @@ impl RendererSealed for SoftwareRenderer {
                 )
             }
         };
+        #[cfg(not(feature = "text-engine"))]
         (PhysicalSize::from_lengths(longest_line_width, height).cast() / scale_factor).cast()
     }
 
@@ -869,46 +860,36 @@ impl RendererSealed for SoftwareRenderer {
         text_item: Pin<&dyn i_slint_core::item_rendering::RenderString>,
         item_rc: &i_slint_core::item_tree::ItemRc,
     ) -> Option<i_slint_core::renderer::ContentWidths> {
-        let scale_factor = self.scale_factor()?;
-        let font_request = text_item.font_request(item_rc);
-        // Evaluate text() before borrowing font_context, as in text_size().
-        let content = text_item.text();
-        #[cfg(feature = "systemfonts")]
-        let slint_ctx = self.slint_context()?;
-        let font = {
-            #[cfg(feature = "systemfonts")]
-            let mut font_ctx = slint_ctx.font_context().borrow_mut();
-            fonts::match_font(
-                &font_request,
-                scale_factor,
-                #[cfg(feature = "systemfonts")]
-                &mut font_ctx,
-            )
-        };
-
-        #[cfg(feature = "systemfonts")]
-        if matches!(font, fonts::Font::VectorFont(_)) && !parley_disabled() {
+        #[cfg(feature = "text-engine")]
+        {
             return sharedparley::text_content_widths(self, text_item, item_rc);
         }
 
+        #[cfg(not(feature = "text-engine"))]
+        let scale_factor = self.scale_factor()?;
+        #[cfg(not(feature = "text-engine"))]
+        let font_request = text_item.font_request(item_rc);
+        #[cfg(not(feature = "text-engine"))]
+        let content = text_item.text();
+        #[cfg(not(feature = "text-engine"))]
+        let font = fonts::match_font(&font_request, scale_factor);
+        #[cfg(not(feature = "text-engine"))]
         let max_lines = text_item.line_limit();
+        #[cfg(not(feature = "text-engine"))]
         let string = match &content {
             PlainOrStyledText::Plain(string) => alloc::borrow::Cow::Borrowed(string.as_str()),
             PlainOrStyledText::Styled(styled_text) => {
                 i_slint_core::styled_text::get_raw_text(styled_text)
             }
         };
+        #[cfg(not(feature = "text-engine"))]
         let (min, max) = match &font {
-            #[cfg(feature = "systemfonts")]
-            fonts::Font::VectorFont(vf) => {
-                fonts::text_layout_for_font(vf, &font_request, scale_factor)
-                    .content_widths(&string, max_lines)
-            }
             fonts::Font::PixelFont(pf) => {
                 fonts::text_layout_for_font(pf, &font_request, scale_factor)
                     .content_widths(&string, max_lines)
             }
         };
+        #[cfg(not(feature = "text-engine"))]
         Some(i_slint_core::renderer::ContentWidths {
             min: (min.cast() / scale_factor).cast(),
             max: (max.cast() / scale_factor).cast(),
@@ -921,48 +902,29 @@ impl RendererSealed for SoftwareRenderer {
         item_rc: &i_slint_core::item_tree::ItemRc,
         ch: char,
     ) -> LogicalSize {
+        #[cfg(feature = "text-engine")]
+        {
+            let Some(slint_ctx) = self.slint_context() else {
+                return Default::default();
+            };
+            let mut font_ctx = slint_ctx.font_context().borrow_mut();
+            return sharedparley::char_size(&mut font_ctx, text_item, item_rc, ch)
+                .unwrap_or_default();
+        }
+
+        #[cfg(not(feature = "text-engine"))]
         let Some(scale_factor) = self.scale_factor() else {
             return LogicalSize::default();
         };
-        let font_request = text_item.font_request(item_rc);
-        #[cfg(feature = "systemfonts")]
-        let Some(slint_ctx) = self.slint_context() else {
-            return Default::default();
-        };
-        let font = {
-            #[cfg(feature = "systemfonts")]
-            let mut font_ctx = slint_ctx.font_context().borrow_mut();
-            fonts::match_font(
-                &font_request,
-                scale_factor,
-                #[cfg(feature = "systemfonts")]
-                &mut font_ctx,
-            )
-        };
-
-        match (font, parley_disabled()) {
-            #[cfg(feature = "systemfonts")]
-            (fonts::Font::VectorFont(_), false) => {
-                let mut font_ctx = slint_ctx.font_context().borrow_mut();
-                sharedparley::char_size(&mut font_ctx, text_item, item_rc, ch).unwrap_or_default()
-            }
-            #[cfg(feature = "systemfonts")]
-            (fonts::Font::VectorFont(vf), true) => {
-                let mut buf = [0u8, 0u8, 0u8, 0u8];
-                let layout = fonts::text_layout_for_font(&vf, &font_request, scale_factor);
-                let (longest_line_width, height) =
-                    layout.text_size(ch.encode_utf8(&mut buf), None, TextWrap::NoWrap, None);
-                (PhysicalSize::from_lengths(longest_line_width, height).cast() / scale_factor)
-                    .cast()
-            }
-            (fonts::Font::PixelFont(pf), _) => {
-                let mut buf = [0u8, 0u8, 0u8, 0u8];
-                let layout = fonts::text_layout_for_font(&pf, &font_request, scale_factor);
-                let (longest_line_width, height) =
-                    layout.text_size(ch.encode_utf8(&mut buf), None, TextWrap::NoWrap, None);
-                (PhysicalSize::from_lengths(longest_line_width, height).cast() / scale_factor)
-                    .cast()
-            }
+        #[cfg(not(feature = "text-engine"))]
+        {
+            let font_request = text_item.font_request(item_rc);
+            let fonts::Font::PixelFont(font) = fonts::match_font(&font_request, scale_factor);
+            let mut buf = [0u8; 4];
+            let layout = fonts::text_layout_for_font(&font, &font_request, scale_factor);
+            let (width, height) =
+                layout.text_size(ch.encode_utf8(&mut buf), None, TextWrap::NoWrap, None);
+            (PhysicalSize::from_lengths(width, height).cast() / scale_factor).cast()
         }
     }
 
@@ -970,53 +932,34 @@ impl RendererSealed for SoftwareRenderer {
         &self,
         font_request: i_slint_core::graphics::FontRequest,
     ) -> i_slint_core::items::FontMetrics {
+        #[cfg(feature = "text-engine")]
+        {
+            let Some(slint_ctx) = self.slint_context() else {
+                return Default::default();
+            };
+            return sharedparley::font_metrics(
+                &mut slint_ctx.font_context().borrow_mut(),
+                font_request,
+            );
+        }
+
+        #[cfg(not(feature = "text-engine"))]
         let Some(scale_factor) = self.scale_factor() else {
             return i_slint_core::items::FontMetrics::default();
         };
-        #[cfg(feature = "systemfonts")]
-        let Some(slint_ctx) = self.slint_context() else {
-            return Default::default();
-        };
-        #[cfg(feature = "systemfonts")]
-        let mut font_ctx = slint_ctx.font_context().borrow_mut();
-        let font = fonts::match_font(
-            &font_request,
-            scale_factor,
-            #[cfg(feature = "systemfonts")]
-            &mut font_ctx,
-        );
+        #[cfg(not(feature = "text-engine"))]
+        {
+            let fonts::Font::PixelFont(font) = fonts::match_font(&font_request, scale_factor);
+            let ascent: LogicalLength = (font.ascent().cast() / scale_factor).cast();
+            let descent: LogicalLength = (font.descent().cast() / scale_factor).cast();
+            let x_height: LogicalLength = (font.x_height().cast() / scale_factor).cast();
+            let cap_height: LogicalLength = (font.cap_height().cast() / scale_factor).cast();
 
-        match (font, parley_disabled()) {
-            #[cfg(feature = "systemfonts")]
-            (fonts::Font::VectorFont(_), false) => {
-                sharedparley::font_metrics(&mut font_ctx, font_request)
-            }
-            #[cfg(feature = "systemfonts")]
-            (fonts::Font::VectorFont(font), true) => {
-                let ascent: LogicalLength = (font.ascent().cast() / scale_factor).cast();
-                let descent: LogicalLength = (font.descent().cast() / scale_factor).cast();
-                let x_height: LogicalLength = (font.x_height().cast() / scale_factor).cast();
-                let cap_height: LogicalLength = (font.cap_height().cast() / scale_factor).cast();
-
-                i_slint_core::items::FontMetrics {
-                    ascent: ascent.get() as _,
-                    descent: descent.get() as _,
-                    x_height: x_height.get() as _,
-                    cap_height: cap_height.get() as _,
-                }
-            }
-            (fonts::Font::PixelFont(font), _) => {
-                let ascent: LogicalLength = (font.ascent().cast() / scale_factor).cast();
-                let descent: LogicalLength = (font.descent().cast() / scale_factor).cast();
-                let x_height: LogicalLength = (font.x_height().cast() / scale_factor).cast();
-                let cap_height: LogicalLength = (font.cap_height().cast() / scale_factor).cast();
-
-                i_slint_core::items::FontMetrics {
-                    ascent: ascent.get() as _,
-                    descent: descent.get() as _,
-                    x_height: x_height.get() as _,
-                    cap_height: cap_height.get() as _,
-                }
+            i_slint_core::items::FontMetrics {
+                ascent: ascent.get() as _,
+                descent: descent.get() as _,
+                x_height: x_height.get() as _,
+                cap_height: cap_height.get() as _,
             }
         }
     }
@@ -1027,90 +970,45 @@ impl RendererSealed for SoftwareRenderer {
         item_rc: &ItemRc,
         pos: LogicalPoint,
     ) -> usize {
+        #[cfg(feature = "text-engine")]
+        {
+            return sharedparley::text_input_byte_offset_for_position(
+                self, text_input, item_rc, pos,
+            );
+        }
+
+        #[cfg(not(feature = "text-engine"))]
         let Some(scale_factor) = self.scale_factor() else {
             return 0;
         };
+        #[cfg(not(feature = "text-engine"))]
         let font_request = text_input.font_request(item_rc);
-        #[cfg(feature = "systemfonts")]
-        let Some(slint_ctx) = self.slint_context() else {
-            return Default::default();
+        #[cfg(not(feature = "text-engine"))]
+        let fonts::Font::PixelFont(font) = fonts::match_font(&font_request, scale_factor);
+        #[cfg(not(feature = "text-engine"))]
+        let visual_representation = text_input.visual_representation(None);
+        #[cfg(not(feature = "text-engine"))]
+        let pos = (pos.cast() * scale_factor)
+            .clamp(euclid::point2(0., 0.), euclid::point2(i16::MAX, i16::MAX).cast())
+            .cast();
+        #[cfg(not(feature = "text-engine"))]
+        let paragraph = TextParagraphLayout {
+            string: &visual_representation.text,
+            layout: fonts::text_layout_for_font(&font, &font_request, scale_factor),
+            max_width: (text_input.width().cast() * scale_factor).cast(),
+            max_height: (text_input.height().cast() * scale_factor).cast(),
+            horizontal_alignment: text_input.horizontal_alignment(),
+            vertical_alignment: text_input.vertical_alignment(),
+            wrap: text_input.wrap(),
+            overflow: TextOverflow::Clip,
+            single_line: false,
+            max_lines: None,
         };
-        let font = {
-            #[cfg(feature = "systemfonts")]
-            let mut font_ctx = slint_ctx.font_context().borrow_mut();
-            fonts::match_font(
-                &font_request,
-                scale_factor,
-                #[cfg(feature = "systemfonts")]
-                &mut font_ctx,
-            )
-        };
 
-        match (font, parley_disabled()) {
-            #[cfg(feature = "systemfonts")]
-            (fonts::Font::VectorFont(_), false) => {
-                sharedparley::text_input_byte_offset_for_position(self, text_input, item_rc, pos)
-            }
-            #[cfg(feature = "systemfonts")]
-            (fonts::Font::VectorFont(vf), true) => {
-                let visual_representation = text_input.visual_representation(None);
-
-                let width = (text_input.width().cast() * scale_factor).cast();
-                let height = (text_input.height().cast() * scale_factor).cast();
-
-                let pos = (pos.cast() * scale_factor)
-                    .clamp(euclid::point2(0., 0.), euclid::point2(i16::MAX, i16::MAX).cast())
-                    .cast();
-
-                let layout = fonts::text_layout_for_font(&vf, &font_request, scale_factor);
-
-                let paragraph = TextParagraphLayout {
-                    string: &visual_representation.text,
-                    layout,
-                    max_width: width,
-                    max_height: height,
-                    horizontal_alignment: text_input.horizontal_alignment(),
-                    vertical_alignment: text_input.vertical_alignment(),
-                    wrap: text_input.wrap(),
-                    overflow: TextOverflow::Clip,
-                    single_line: false,
-                    max_lines: None,
-                };
-
-                visual_representation.map_byte_offset_from_visual_text_to_actual_text(
-                    paragraph.byte_offset_for_position((pos.x_length(), pos.y_length())),
-                )
-            }
-            (fonts::Font::PixelFont(pf), _) => {
-                let visual_representation = text_input.visual_representation(None);
-
-                let width = (text_input.width().cast() * scale_factor).cast();
-                let height = (text_input.height().cast() * scale_factor).cast();
-
-                let pos = (pos.cast() * scale_factor)
-                    .clamp(euclid::point2(0., 0.), euclid::point2(i16::MAX, i16::MAX).cast())
-                    .cast();
-
-                let layout = fonts::text_layout_for_font(&pf, &font_request, scale_factor);
-
-                let paragraph = TextParagraphLayout {
-                    string: &visual_representation.text,
-                    layout,
-                    max_width: width,
-                    max_height: height,
-                    horizontal_alignment: text_input.horizontal_alignment(),
-                    vertical_alignment: text_input.vertical_alignment(),
-                    wrap: text_input.wrap(),
-                    overflow: TextOverflow::Clip,
-                    single_line: false,
-                    max_lines: None,
-                };
-
-                visual_representation.map_byte_offset_from_visual_text_to_actual_text(
-                    paragraph.byte_offset_for_position((pos.x_length(), pos.y_length())),
-                )
-            }
-        }
+        #[cfg(not(feature = "text-engine"))]
+        visual_representation.map_byte_offset_from_visual_text_to_actual_text(
+            paragraph.byte_offset_for_position((pos.x_length(), pos.y_length())),
+        )
     }
 
     fn text_input_cursor_rect_for_byte_offset(
@@ -1119,107 +1017,55 @@ impl RendererSealed for SoftwareRenderer {
         item_rc: &ItemRc,
         byte_offset: usize,
     ) -> LogicalRect {
+        #[cfg(feature = "text-engine")]
+        {
+            return sharedparley::text_input_cursor_rect_for_byte_offset(
+                self,
+                text_input,
+                item_rc,
+                byte_offset,
+            );
+        }
+
+        #[cfg(not(feature = "text-engine"))]
         let Some(scale_factor) = self.scale_factor() else {
             return LogicalRect::default();
         };
+        #[cfg(not(feature = "text-engine"))]
         let font_request = text_input.font_request(item_rc);
-        #[cfg(feature = "systemfonts")]
-        let Some(slint_ctx) = self.slint_context() else {
-            return Default::default();
+        #[cfg(not(feature = "text-engine"))]
+        let fonts::Font::PixelFont(font) = fonts::match_font(&font_request, scale_factor);
+        #[cfg(not(feature = "text-engine"))]
+        let visual_representation = text_input.visual_representation(None);
+        #[cfg(not(feature = "text-engine"))]
+        let paragraph = TextParagraphLayout {
+            string: &visual_representation.text,
+            layout: fonts::text_layout_for_font(&font, &font_request, scale_factor),
+            max_width: (text_input.width().cast() * scale_factor).cast(),
+            max_height: (text_input.height().cast() * scale_factor).cast(),
+            horizontal_alignment: text_input.horizontal_alignment(),
+            vertical_alignment: text_input.vertical_alignment(),
+            wrap: text_input.wrap(),
+            overflow: TextOverflow::Clip,
+            single_line: false,
+            max_lines: None,
         };
-        let font = {
-            #[cfg(feature = "systemfonts")]
-            let mut font_ctx = slint_ctx.font_context().borrow_mut();
-            fonts::match_font(
-                &font_request,
-                scale_factor,
-                #[cfg(feature = "systemfonts")]
-                &mut font_ctx,
-            )
-        };
+        #[cfg(not(feature = "text-engine"))]
+        let cursor_position = paragraph.cursor_pos_for_byte_offset(byte_offset);
+        #[cfg(not(feature = "text-engine"))]
+        let cursor_height = font.height();
 
-        match (font, parley_disabled()) {
-            #[cfg(feature = "systemfonts")]
-            (fonts::Font::VectorFont(_), false) => {
-                sharedparley::text_input_cursor_rect_for_byte_offset(
-                    self,
-                    text_input,
-                    item_rc,
-                    byte_offset,
-                )
-            }
-            #[cfg(feature = "systemfonts")]
-            (fonts::Font::VectorFont(vf), true) => {
-                let visual_representation = text_input.visual_representation(None);
-
-                let width = (text_input.width().cast() * scale_factor).cast();
-                let height = (text_input.height().cast() * scale_factor).cast();
-
-                let layout = fonts::text_layout_for_font(&vf, &font_request, scale_factor);
-
-                let paragraph = TextParagraphLayout {
-                    string: &visual_representation.text,
-                    layout,
-                    max_width: width,
-                    max_height: height,
-                    horizontal_alignment: text_input.horizontal_alignment(),
-                    vertical_alignment: text_input.vertical_alignment(),
-                    wrap: text_input.wrap(),
-                    overflow: TextOverflow::Clip,
-                    single_line: false,
-                    max_lines: None,
-                };
-
-                let cursor_position = paragraph.cursor_pos_for_byte_offset(byte_offset);
-                let cursor_height = vf.height();
-
-                (PhysicalRect::new(
-                    PhysicalPoint::from_lengths(cursor_position.0, cursor_position.1),
-                    PhysicalSize::from_lengths(
-                        (text_input.text_cursor_width().cast() * scale_factor).cast(),
-                        cursor_height,
-                    ),
-                )
-                .cast()
-                    / scale_factor)
-                    .cast()
-            }
-            (fonts::Font::PixelFont(pf), _) => {
-                let visual_representation = text_input.visual_representation(None);
-
-                let width = (text_input.width().cast() * scale_factor).cast();
-                let height = (text_input.height().cast() * scale_factor).cast();
-
-                let layout = fonts::text_layout_for_font(&pf, &font_request, scale_factor);
-
-                let paragraph = TextParagraphLayout {
-                    string: &visual_representation.text,
-                    layout,
-                    max_width: width,
-                    max_height: height,
-                    horizontal_alignment: text_input.horizontal_alignment(),
-                    vertical_alignment: text_input.vertical_alignment(),
-                    wrap: text_input.wrap(),
-                    overflow: TextOverflow::Clip,
-                    single_line: false,
-                    max_lines: None,
-                };
-
-                let cursor_position = paragraph.cursor_pos_for_byte_offset(byte_offset);
-                let cursor_height = pf.height();
-
-                (PhysicalRect::new(
-                    PhysicalPoint::from_lengths(cursor_position.0, cursor_position.1),
-                    PhysicalSize::from_lengths(
-                        (text_input.text_cursor_width().cast() * scale_factor).cast(),
-                        cursor_height,
-                    ),
-                )
-                .cast()
-                    / scale_factor)
-                    .cast()
-            }
-        }
+        #[cfg(not(feature = "text-engine"))]
+        (PhysicalRect::new(
+            PhysicalPoint::from_lengths(cursor_position.0, cursor_position.1),
+            PhysicalSize::from_lengths(
+                (text_input.text_cursor_width().cast() * scale_factor).cast(),
+                cursor_height,
+            ),
+        )
+        .cast()
+            / scale_factor)
+            .cast()
     }
 
     fn free_graphics_resources(
@@ -1227,7 +1073,7 @@ impl RendererSealed for SoftwareRenderer {
         _component: i_slint_core::item_tree::ItemTreeRef,
         items: &mut dyn Iterator<Item = Pin<i_slint_core::items::ItemRef<'_>>>,
     ) -> Result<(), i_slint_core::platform::PlatformError> {
-        #[cfg(feature = "systemfonts")]
+        #[cfg(feature = "text-engine")]
         self.text_layout_cache.component_destroyed(_component);
         self.partial_rendering_state.free_graphics_resources(items);
         Ok(())
@@ -1241,14 +1087,16 @@ impl RendererSealed for SoftwareRenderer {
         fonts::register_bitmap_font(font_data);
     }
 
-    #[cfg(feature = "systemfonts")]
+    #[cfg(feature = "text-engine")]
     fn register_font_from_memory(
         &self,
         data: &'static [u8],
     ) -> Result<(), std::boxed::Box<dyn std::error::Error>> {
         let ctx = self.slint_context().ok_or("slint platform not initialized")?;
-        ctx.font_context().borrow_mut().register_static_font(data);
-        Ok(())
+        ctx.font_context().borrow_mut().register_static_font(data).map_err(|error| {
+            i_slint_core::debug_log!("Unable to register an embedded font: {error}");
+            error.into()
+        })
     }
 
     #[cfg(all(feature = "systemfonts", not(target_arch = "wasm32")))]
@@ -1265,7 +1113,7 @@ impl RendererSealed for SoftwareRenderer {
 
     fn set_window_adapter(&self, window_adapter: &Rc<dyn WindowAdapter>) {
         *self.maybe_window_adapter.borrow_mut() = Some(Rc::downgrade(window_adapter));
-        #[cfg(feature = "systemfonts")]
+        #[cfg(feature = "text-engine")]
         self.text_layout_cache.clear_all();
         self.partial_rendering_state.clear_cache();
     }
@@ -1332,15 +1180,6 @@ impl RendererSealed for SoftwareRenderer {
     fn supports_transformations(&self) -> bool {
         false
     }
-}
-
-fn parley_disabled() -> bool {
-    #[cfg(feature = "systemfonts")]
-    {
-        std::env::var("SLINT_SOFTWARE_RENDERER_PARLEY_DISABLED").is_ok()
-    }
-    #[cfg(not(feature = "systemfonts"))]
-    false
 }
 
 fn render_window_frame_by_line(
@@ -1502,8 +1341,10 @@ fn prepare_scene(
         window,
         PrepareScene { scale_factor: factor, ..Default::default() },
         software_renderer.rotation.get(),
-        #[cfg(feature = "systemfonts")]
+        #[cfg(feature = "text-engine")]
         &software_renderer.text_layout_cache,
+        #[cfg(feature = "text-engine")]
+        &software_renderer.glyph_cache,
     );
     let mut renderer =
         software_renderer.partial_rendering_state.create_partial_renderer(prepare_scene);
@@ -1603,7 +1444,9 @@ fn prepare_scene(
 }
 
 trait ProcessScene {
+    #[cfg(not(feature = "text-engine"))]
     fn process_scene_texture(&mut self, geometry: PhysicalRect, texture: SceneTexture<'static>);
+
     fn process_target_texture(
         &mut self,
         texture: &target_pixel_buffer::DrawTextureArgs,
@@ -1927,6 +1770,7 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> RenderToBuffer<'_, B> {
 }
 
 impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<'_, B> {
+    #[cfg(not(feature = "text-engine"))]
     fn process_scene_texture(&mut self, geometry: PhysicalRect, texture: SceneTexture<'static>) {
         self.process_texture_impl(geometry, texture);
     }
@@ -2060,6 +1904,7 @@ struct PrepareScene {
 }
 
 impl ProcessScene for PrepareScene {
+    #[cfg(not(feature = "text-engine"))]
     fn process_scene_texture(&mut self, geometry: PhysicalRect, texture: SceneTexture<'static>) {
         let texture_index = self.vectors.textures.len() as u16;
         self.vectors.textures.push(texture);
@@ -2222,8 +2067,10 @@ struct SceneBuilder<'a, T> {
     scale_factor: ScaleFactor,
     window: &'a WindowInner,
     rotation: RotationInfo,
-    #[cfg(feature = "systemfonts")]
+    #[cfg(feature = "text-engine")]
     text_layout_cache: &'a sharedparley::TextLayoutCache,
+    #[cfg(feature = "text-engine")]
+    glyph_cache: &'a RefCell<fonts::vectorfont::GlyphCache>,
 }
 
 impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
@@ -2233,7 +2080,8 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
         window: &'a WindowInner,
         processor: T,
         orientation: RenderingRotation,
-        #[cfg(feature = "systemfonts")] text_layout_cache: &'a sharedparley::TextLayoutCache,
+        #[cfg(feature = "text-engine")] text_layout_cache: &'a sharedparley::TextLayoutCache,
+        #[cfg(feature = "text-engine")] glyph_cache: &'a RefCell<fonts::vectorfont::GlyphCache>,
     ) -> Self {
         Self {
             processor,
@@ -2249,8 +2097,10 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
             scale_factor,
             window,
             rotation: RotationInfo { orientation, screen_size },
-            #[cfg(feature = "systemfonts")]
+            #[cfg(feature = "text-engine")]
             text_layout_cache,
+            #[cfg(feature = "text-engine")]
+            glyph_cache,
         }
     }
 
@@ -2459,6 +2309,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
         };
     }
 
+    #[cfg(not(feature = "text-engine"))]
     fn draw_text_paragraph<Font>(
         &mut self,
         paragraph: &TextParagraphLayout<'_, Font>,
@@ -2657,6 +2508,7 @@ fn alpha_color(color: Color, alpha: u8) -> Color {
     }
 }
 
+#[cfg(not(feature = "text-engine"))]
 struct SelectionInfo {
     selection_color: Color,
     selection_background: Color,
@@ -2815,25 +2667,19 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         size: LogicalSize,
         _cache: &CachedRenderingData,
     ) {
-        let font_request = text.font_request(self_rc);
-
-        #[cfg(feature = "systemfonts")]
-        let mut font_ctx = self.window.context().font_context().borrow_mut();
-        let font = fonts::match_font(
-            &font_request,
-            self.scale_factor,
-            #[cfg(feature = "systemfonts")]
-            &mut font_ctx,
-        );
-
-        #[cfg(feature = "systemfonts")]
-        if matches!(font, fonts::Font::VectorFont(_)) && !parley_disabled() {
-            drop(font_ctx);
+        #[cfg(feature = "text-engine")]
+        {
             sharedparley::draw_text(self, text, Some(self_rc), size, Some(self.text_layout_cache));
             return;
         }
 
+        #[cfg(not(feature = "text-engine"))]
+        let font_request = text.font_request(self_rc);
+        #[cfg(not(feature = "text-engine"))]
+        let fonts::Font::PixelFont(font) = fonts::match_font(&font_request, self.scale_factor);
+        #[cfg(not(feature = "text-engine"))]
         let content = text.text();
+        #[cfg(not(feature = "text-engine"))]
         let string = match &content {
             PlainOrStyledText::Plain(string) => alloc::borrow::Cow::Borrowed(string.as_str()),
             PlainOrStyledText::Styled(styled_text) => {
@@ -2841,18 +2687,24 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
             }
         };
 
+        #[cfg(not(feature = "text-engine"))]
         if string.trim().is_empty() {
             return;
         }
 
+        #[cfg(not(feature = "text-engine"))]
         let geom = LogicalRect::from(size);
+        #[cfg(not(feature = "text-engine"))]
         if !self.should_draw(&geom) {
             return;
         }
 
+        #[cfg(not(feature = "text-engine"))]
         let color = self.alpha_color(text.color().color());
+        #[cfg(not(feature = "text-engine"))]
         let max_size = (geom.size.cast() * self.scale_factor).cast();
 
+        #[cfg(not(feature = "text-engine"))]
         // Clip glyphs not only against the global clip but also against the Text's geometry to avoid drawing outside
         // of its boundaries (that breaks partial rendering and the cast to usize for the item relative coordinate below).
         // FIXME: we should allow drawing outside of the Text element's boundaries.
@@ -2862,48 +2714,29 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         } else {
             return; // This should have been caught earlier already
         };
+        #[cfg(not(feature = "text-engine"))]
         let offset = self.current_state.offset.to_vector().cast() * self.scale_factor;
 
+        #[cfg(not(feature = "text-engine"))]
         let (horizontal_alignment, vertical_alignment) = text.alignment();
+        #[cfg(not(feature = "text-engine"))]
         let max_lines = text.line_limit();
 
-        match &font {
-            fonts::Font::PixelFont(pf) => {
-                let layout = fonts::text_layout_for_font(pf, &font_request, self.scale_factor);
-                let paragraph = TextParagraphLayout {
-                    string: &string,
-                    layout,
-                    max_width: max_size.width_length(),
-                    max_height: max_size.height_length(),
-                    horizontal_alignment,
-                    vertical_alignment,
-                    wrap: text.wrap(),
-                    overflow: text.overflow(),
-                    single_line: false,
-                    max_lines,
-                };
-
-                self.draw_text_paragraph(&paragraph, physical_clip, offset, color, None);
-            }
-            #[cfg(feature = "systemfonts")]
-            fonts::Font::VectorFont(vf) => {
-                let layout = fonts::text_layout_for_font(vf, &font_request, self.scale_factor);
-                let paragraph = TextParagraphLayout {
-                    string: &string,
-                    layout,
-                    max_width: max_size.width_length(),
-                    max_height: max_size.height_length(),
-                    horizontal_alignment,
-                    vertical_alignment,
-                    wrap: text.wrap(),
-                    overflow: text.overflow(),
-                    single_line: false,
-                    max_lines,
-                };
-
-                self.draw_text_paragraph(&paragraph, physical_clip, offset, color, None);
-            }
+        #[cfg(not(feature = "text-engine"))]
+        let paragraph = TextParagraphLayout {
+            string: &string,
+            layout: fonts::text_layout_for_font(&font, &font_request, self.scale_factor),
+            max_width: max_size.width_length(),
+            max_height: max_size.height_length(),
+            horizontal_alignment,
+            vertical_alignment,
+            wrap: text.wrap(),
+            overflow: text.overflow(),
+            single_line: false,
+            max_lines,
         };
+        #[cfg(not(feature = "text-engine"))]
+        self.draw_text_paragraph(&paragraph, physical_clip, offset, color, None);
     }
 
     fn draw_text_input(
@@ -2912,162 +2745,87 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         self_rc: &ItemRc,
         size: LogicalSize,
     ) {
-        let font_request = text_input.font_request(self_rc);
-        #[cfg(feature = "systemfonts")]
-        let mut font_ctx = self.window.context().font_context().borrow_mut();
-        let font = fonts::match_font(
-            &font_request,
-            self.scale_factor,
-            #[cfg(feature = "systemfonts")]
-            &mut font_ctx,
-        );
+        #[cfg(feature = "text-engine")]
+        {
+            sharedparley::draw_text_input(self, text_input, self_rc, size, None);
+            return;
+        }
 
-        match (font, parley_disabled()) {
-            #[cfg(feature = "systemfonts")]
-            (fonts::Font::VectorFont(_), false) => {
-                drop(font_ctx);
-                sharedparley::draw_text_input(self, text_input, self_rc, size, None);
-            }
-            #[cfg(feature = "systemfonts")]
-            (fonts::Font::VectorFont(vf), true) => {
-                let geom = LogicalRect::from(size);
-                if !self.should_draw(&geom) {
-                    return;
-                }
+        #[cfg(not(feature = "text-engine"))]
+        {
+            let font_request = text_input.font_request(self_rc);
+            let font = fonts::match_font(&font_request, self.scale_factor);
 
-                let max_size = (geom.size.cast() * self.scale_factor).cast();
-
-                // Clip glyphs not only against the global clip but also against the Text's geometry to avoid drawing outside
-                // of its boundaries (that breaks partial rendering and the cast to usize for the item relative coordinate below).
-                // FIXME: we should allow drawing outside of the Text element's boundaries.
-                let physical_clip =
-                    if let Some(logical_clip) = self.current_state.clip.intersection(&geom) {
-                        logical_clip.cast() * self.scale_factor
-                    } else {
-                        return; // This should have been caught earlier already
-                    };
-                let offset = self.current_state.offset.to_vector().cast() * self.scale_factor;
-
-                let text_visual_representation = text_input.visual_representation(None);
-                let color = self.alpha_color(text_visual_representation.text_color.color());
-
-                let selection = (!text_visual_representation.selection_range.is_empty()).then_some(
-                    SelectionInfo {
-                        selection_background: self
-                            .alpha_color(text_input.selection_background_color()),
-                        selection_color: self.alpha_color(text_input.selection_foreground_color()),
-                        selection: text_visual_representation.selection_range.clone(),
-                    },
-                );
-
-                let paragraph = TextParagraphLayout {
-                    string: &text_visual_representation.text,
-                    layout: fonts::text_layout_for_font(&vf, &font_request, self.scale_factor),
-                    max_width: max_size.width_length(),
-                    max_height: max_size.height_length(),
-                    horizontal_alignment: text_input.horizontal_alignment(),
-                    vertical_alignment: text_input.vertical_alignment(),
-                    wrap: text_input.wrap(),
-                    overflow: TextOverflow::Clip,
-                    single_line: text_input.single_line(),
-                    max_lines: None,
-                };
-
-                self.draw_text_paragraph(&paragraph, physical_clip, offset, color, selection);
-
-                let cursor_pos_and_height =
-                    text_visual_representation.cursor_position.map(|cursor_offset| {
-                        (paragraph.cursor_pos_for_byte_offset(cursor_offset), vf.height())
-                    });
-
-                if let Some(((cursor_x, cursor_y), cursor_height)) = cursor_pos_and_height {
-                    let cursor_rect = PhysicalRect::new(
-                        PhysicalPoint::from_lengths(cursor_x, cursor_y),
-                        PhysicalSize::from_lengths(
-                            (text_input.text_cursor_width().cast() * self.scale_factor).cast(),
-                            cursor_height,
-                        ),
-                    );
-
-                    if let Some(clipped_src) = cursor_rect.intersection(&physical_clip.cast()) {
-                        let geometry =
-                            clipped_src.translate(offset.cast()).transformed(self.rotation);
-                        let args = target_pixel_buffer::DrawRectangleArgs::from_rect(
-                            geometry.cast(),
-                            self.alpha_color(text_visual_representation.cursor_color).into(),
-                        );
-                        self.processor.process_rectangle(&args, geometry);
+            match font {
+                fonts::Font::PixelFont(pf) => {
+                    let geom = LogicalRect::from(size);
+                    if !self.should_draw(&geom) {
+                        return;
                     }
-                }
-            }
-            (fonts::Font::PixelFont(pf), _) => {
-                let geom = LogicalRect::from(size);
-                if !self.should_draw(&geom) {
-                    return;
-                }
 
-                let max_size = (geom.size.cast() * self.scale_factor).cast();
+                    let max_size = (geom.size.cast() * self.scale_factor).cast();
 
-                // Clip glyphs not only against the global clip but also against the Text's geometry to avoid drawing outside
-                // of its boundaries (that breaks partial rendering and the cast to usize for the item relative coordinate below).
-                // FIXME: we should allow drawing outside of the Text element's boundaries.
-                let physical_clip =
-                    if let Some(logical_clip) = self.current_state.clip.intersection(&geom) {
-                        logical_clip.cast() * self.scale_factor
-                    } else {
-                        return; // This should have been caught earlier already
+                    // Clip glyphs not only against the global clip but also against the Text's geometry to avoid drawing outside
+                    // of its boundaries (that breaks partial rendering and the cast to usize for the item relative coordinate below).
+                    // FIXME: we should allow drawing outside of the Text element's boundaries.
+                    let physical_clip =
+                        if let Some(logical_clip) = self.current_state.clip.intersection(&geom) {
+                            logical_clip.cast() * self.scale_factor
+                        } else {
+                            return; // This should have been caught earlier already
+                        };
+                    let offset = self.current_state.offset.to_vector().cast() * self.scale_factor;
+
+                    let text_visual_representation = text_input.visual_representation(None);
+                    let color = self.alpha_color(text_visual_representation.text_color.color());
+
+                    let selection = (!text_visual_representation.selection_range.is_empty())
+                        .then_some(SelectionInfo {
+                            selection_background: self
+                                .alpha_color(text_input.selection_background_color()),
+                            selection_color: self
+                                .alpha_color(text_input.selection_foreground_color()),
+                            selection: text_visual_representation.selection_range.clone(),
+                        });
+
+                    let paragraph = TextParagraphLayout {
+                        string: &text_visual_representation.text,
+                        layout: fonts::text_layout_for_font(&pf, &font_request, self.scale_factor),
+                        max_width: max_size.width_length(),
+                        max_height: max_size.height_length(),
+                        horizontal_alignment: text_input.horizontal_alignment(),
+                        vertical_alignment: text_input.vertical_alignment(),
+                        wrap: text_input.wrap(),
+                        overflow: TextOverflow::Clip,
+                        single_line: text_input.single_line(),
+                        max_lines: None,
                     };
-                let offset = self.current_state.offset.to_vector().cast() * self.scale_factor;
 
-                let text_visual_representation = text_input.visual_representation(None);
-                let color = self.alpha_color(text_visual_representation.text_color.color());
+                    self.draw_text_paragraph(&paragraph, physical_clip, offset, color, selection);
 
-                let selection = (!text_visual_representation.selection_range.is_empty()).then_some(
-                    SelectionInfo {
-                        selection_background: self
-                            .alpha_color(text_input.selection_background_color()),
-                        selection_color: self.alpha_color(text_input.selection_foreground_color()),
-                        selection: text_visual_representation.selection_range.clone(),
-                    },
-                );
+                    let cursor_pos_and_height =
+                        text_visual_representation.cursor_position.map(|cursor_offset| {
+                            (paragraph.cursor_pos_for_byte_offset(cursor_offset), pf.height())
+                        });
 
-                let paragraph = TextParagraphLayout {
-                    string: &text_visual_representation.text,
-                    layout: fonts::text_layout_for_font(&pf, &font_request, self.scale_factor),
-                    max_width: max_size.width_length(),
-                    max_height: max_size.height_length(),
-                    horizontal_alignment: text_input.horizontal_alignment(),
-                    vertical_alignment: text_input.vertical_alignment(),
-                    wrap: text_input.wrap(),
-                    overflow: TextOverflow::Clip,
-                    single_line: text_input.single_line(),
-                    max_lines: None,
-                };
-
-                self.draw_text_paragraph(&paragraph, physical_clip, offset, color, selection);
-
-                let cursor_pos_and_height =
-                    text_visual_representation.cursor_position.map(|cursor_offset| {
-                        (paragraph.cursor_pos_for_byte_offset(cursor_offset), pf.height())
-                    });
-
-                if let Some(((cursor_x, cursor_y), cursor_height)) = cursor_pos_and_height {
-                    let cursor_rect = PhysicalRect::new(
-                        PhysicalPoint::from_lengths(cursor_x, cursor_y),
-                        PhysicalSize::from_lengths(
-                            (text_input.text_cursor_width().cast() * self.scale_factor).cast(),
-                            cursor_height,
-                        ),
-                    );
-
-                    if let Some(clipped_src) = cursor_rect.intersection(&physical_clip.cast()) {
-                        let geometry =
-                            clipped_src.translate(offset.cast()).transformed(self.rotation);
-                        let args = target_pixel_buffer::DrawRectangleArgs::from_rect(
-                            geometry.cast(),
-                            self.alpha_color(text_visual_representation.cursor_color).into(),
+                    if let Some(((cursor_x, cursor_y), cursor_height)) = cursor_pos_and_height {
+                        let cursor_rect = PhysicalRect::new(
+                            PhysicalPoint::from_lengths(cursor_x, cursor_y),
+                            PhysicalSize::from_lengths(
+                                (text_input.text_cursor_width().cast() * self.scale_factor).cast(),
+                                cursor_height,
+                            ),
                         );
-                        self.processor.process_rectangle(&args, geometry);
+
+                        if let Some(clipped_src) = cursor_rect.intersection(&physical_clip.cast()) {
+                            let geometry =
+                                clipped_src.translate(offset.cast()).transformed(self.rotation);
+                            let args = target_pixel_buffer::DrawRectangleArgs::from_rect(
+                                geometry.cast(),
+                                self.alpha_color(text_visual_representation.cursor_color).into(),
+                            );
+                            self.processor.process_rectangle(&args, geometry);
+                        }
                     }
                 }
             }
@@ -3272,65 +3030,43 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
     }
 
     fn draw_string(&mut self, string: &str, color: Color) {
-        let font_request = Default::default();
-        #[cfg(feature = "systemfonts")]
-        let mut font_ctx = self.window.context().font_context().borrow_mut();
-        let font = fonts::match_font(
-            &font_request,
-            self.scale_factor,
-            #[cfg(feature = "systemfonts")]
-            &mut font_ctx,
-        );
-        let clip = self.current_state.clip.cast() * self.scale_factor;
+        #[cfg(feature = "text-engine")]
+        {
+            sharedparley::draw_text(
+                self,
+                std::pin::pin!((i_slint_core::SharedString::from(string), Brush::from(color))),
+                None,
+                self.current_state.clip.size.cast(),
+                None,
+            );
+            return;
+        }
 
-        match (font, parley_disabled()) {
-            #[cfg(feature = "systemfonts")]
-            (fonts::Font::VectorFont(_), false) => {
-                drop(font_ctx);
-                sharedparley::draw_text(
-                    self,
-                    std::pin::pin!((i_slint_core::SharedString::from(string), Brush::from(color))),
-                    None,
-                    self.current_state.clip.size.cast(),
-                    None,
-                );
-            }
-            #[cfg(feature = "systemfonts")]
-            (fonts::Font::VectorFont(vf), true) => {
-                let layout = fonts::text_layout_for_font(&vf, &font_request, self.scale_factor);
+        #[cfg(not(feature = "text-engine"))]
+        {
+            let font_request = Default::default();
+            let font = fonts::match_font(&font_request, self.scale_factor);
+            let clip = self.current_state.clip.cast() * self.scale_factor;
 
-                let paragraph = TextParagraphLayout {
-                    string,
-                    layout,
-                    max_width: clip.width_length().cast(),
-                    max_height: clip.height_length().cast(),
-                    horizontal_alignment: Default::default(),
-                    vertical_alignment: Default::default(),
-                    wrap: Default::default(),
-                    overflow: Default::default(),
-                    single_line: false,
-                    max_lines: None,
-                };
+            match font {
+                fonts::Font::PixelFont(pf) => {
+                    let layout = fonts::text_layout_for_font(&pf, &font_request, self.scale_factor);
 
-                self.draw_text_paragraph(&paragraph, clip, Default::default(), color, None);
-            }
-            (fonts::Font::PixelFont(pf), _) => {
-                let layout = fonts::text_layout_for_font(&pf, &font_request, self.scale_factor);
+                    let paragraph = TextParagraphLayout {
+                        string,
+                        layout,
+                        max_width: clip.width_length().cast(),
+                        max_height: clip.height_length().cast(),
+                        horizontal_alignment: Default::default(),
+                        vertical_alignment: Default::default(),
+                        wrap: Default::default(),
+                        overflow: Default::default(),
+                        single_line: false,
+                        max_lines: None,
+                    };
 
-                let paragraph = TextParagraphLayout {
-                    string,
-                    layout,
-                    max_width: clip.width_length().cast(),
-                    max_height: clip.height_length().cast(),
-                    horizontal_alignment: Default::default(),
-                    vertical_alignment: Default::default(),
-                    wrap: Default::default(),
-                    overflow: Default::default(),
-                    single_line: false,
-                    max_lines: None,
-                };
-
-                self.draw_text_paragraph(&paragraph, clip, Default::default(), color, None);
+                    self.draw_text_paragraph(&paragraph, clip, Default::default(), color, None);
+                }
             }
         }
     }
@@ -3368,10 +3104,10 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRendererFeatures for Sce
     const SUPPORTS_TRANSFORMATIONS: bool = false;
 }
 
-#[cfg(feature = "systemfonts")]
+#[cfg(feature = "text-engine")]
 use i_slint_core::textlayout::sharedparley::{self, fontique};
 
-#[cfg(feature = "systemfonts")]
+#[cfg(feature = "text-engine")]
 impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
     type PlatformBrush = Color;
 
@@ -3444,14 +3180,23 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
         font: &sharedparley::parley::FontData,
         font_size: sharedparley::PhysicalLength,
         normalized_coords: &[i16],
-        _synthesis: &fontique::Synthesis,
+        synthesis: &fontique::Synthesis,
         color: Self::PlatformBrush,
         y_offset: sharedparley::PhysicalLength,
         glyphs_it: &mut dyn Iterator<Item = sharedparley::parley::layout::Glyph>,
     ) {
+        if font_size.get() <= 0.0 {
+            return;
+        }
+        #[cfg(not(feature = "embedded-ttf-only"))]
         let slint_context = self.window.context();
-        let (swash_key, swash_offset) =
-            fonts::systemfonts::get_swash_font_info(&font.data, font.index);
+        #[cfg(not(feature = "embedded-ttf-only"))]
+        let Some((swash_key, swash_offset)) =
+            fonts::systemfonts::get_swash_font_info(&font.data, font.index)
+        else {
+            return;
+        };
+        #[cfg(not(feature = "embedded-ttf-only"))]
         let font = fonts::vectorfont::VectorFont::new_from_blob_and_index_with_coords(
             font.data.clone(),
             font.index,
@@ -3459,6 +3204,15 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
             swash_offset,
             font_size.cast(),
             normalized_coords,
+            *synthesis,
+        );
+        #[cfg(feature = "embedded-ttf-only")]
+        let font = fonts::vectorfont::VectorFont::new_from_blob_and_index_with_coords(
+            font.data.clone(),
+            font.index,
+            font_size.cast(),
+            normalized_coords,
+            *synthesis,
         );
 
         let global_offset: euclid::Vector2D<f32, PhysicalPx> =
@@ -3467,9 +3221,23 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
         const SUBPIXEL_BINS: i32 = fonts::vectorfont::SUBPIXEL_BIN_COUNT;
 
         for positioned_glyph in glyphs_it {
-            let Some(id) = std::num::NonZero::new(positioned_glyph.id as u16) else {
+            let Ok(id) = u16::try_from(positioned_glyph.id) else {
+                static INVALID_GLYPH_ID_WARNING: std::sync::Once = std::sync::Once::new();
+                INVALID_GLYPH_ID_WARNING.call_once(|| {
+                    i_slint_core::debug_log!(
+                        "The text shaper returned a glyph identifier outside the OpenType range"
+                    );
+                });
                 continue;
             };
+            if id == 0 {
+                static MISSING_GLYPH_WARNING: std::sync::Once = std::sync::Once::new();
+                MISSING_GLYPH_WARNING.call_once(|| {
+                    i_slint_core::debug_log!(
+                        "A font fallback chain produced a missing glyph; rendering the font's .notdef glyph"
+                    );
+                });
+            }
 
             // Absolute, sub-pixel-accurate device position of the pen for this glyph.
             let abs_x = global_offset.x + positioned_glyph.x;
@@ -3485,7 +3253,11 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
             let dst_int_x = quantized_x.div_euclid(SUBPIXEL_BINS);
             let subpixel_bin = quantized_x.rem_euclid(SUBPIXEL_BINS) as u8;
 
-            let Some(glyph) = font.render_vector_glyph(id, subpixel_bin, slint_context) else {
+            #[cfg(not(feature = "embedded-ttf-only"))]
+            let glyph = font.render_vector_glyph(id, subpixel_bin, slint_context, self.glyph_cache);
+            #[cfg(feature = "embedded-ttf-only")]
+            let glyph = font.render_vector_glyph(id, subpixel_bin, self.glyph_cache);
+            let Some(glyph) = glyph else {
                 continue;
             };
 

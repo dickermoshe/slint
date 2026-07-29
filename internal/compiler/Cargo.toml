@@ -37,18 +37,18 @@ display-diagnostics = ["dep:annotate-snippets"]
 renderer-software = [
   "image",
   "dep:resvg",
-  "dep:swash",
-  "dep:skrifa",
   "i-slint-common/shared-fontique",
   "i-slint-common/svg-text",
   "dep:rayon",
 ]
+# Discover compiler-host fonts in addition to imported application fonts.
+renderer-software-system-fonts = ["renderer-software", "i-slint-common/system-fonts"]
 # Enable `image`'s default feature set (additional codecs). This is enabled by
 # default by `slint-build` and the `slint-compiler` binary for compatibility, but
 # can be opted out from to keep builds minimal.
 image-default-formats = ["image?/default"]
-# Enable support to embed the fonts as signed distance fields
-sdf-fonts = ["renderer-software", "dep:fdsm", "dep:fdsm-ttf-parser", "dep:nalgebra", "dep:rayon"]
+# Retain the former SDF-font configuration surface for compatibility.
+sdf-fonts = ["renderer-software"]
 
 # Translation bundler
 bundle-translations = ["dep:rspolib", "i-slint-common/locale-decimal-separator"]
@@ -82,13 +82,6 @@ typed-index-collections = { workspace = true }
 # for processing and embedding the rendered image (texture)
 image = { workspace = true, optional = true }
 resvg = { workspace = true, optional = true }
-# font embedding
-swash = { workspace = true, optional = true, features = ["scale", "render", "std"] }
-skrifa = { workspace = true, optional = true }
-fdsm = { version = "0.8.0", optional = true }
-fdsm-ttf-parser = { version = "0.2", optional = true }
-# Keep in sync with the nalgebra version used by fdsm
-nalgebra = { version = "0.34.0", optional = true }
 rayon = { workspace = true, optional = true }
 # translations
 rspolib = { version = "0.1.2", optional = true }
@@ -117,6 +110,7 @@ required-features = ["rust"]
 [package.metadata.docs.rs]
 features = [
   "renderer-software",
+  "renderer-software-system-fonts",
   "display-diagnostics",
   "bundle-translations",
   "cpp",

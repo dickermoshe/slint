@@ -215,7 +215,10 @@ pub mod generated_code {
 
 pub mod mcu {
     #![doc = include_str!("mcu.md")]
-    #[cfg(feature = "renderer-software")]
+    #[cfg(any(
+        feature = "renderer-software",
+        feature = "renderer-software-embedded-ttf-only"
+    ))]
     use crate::platform::software_renderer::*;
     use crate::platform::*;
     mod slint {

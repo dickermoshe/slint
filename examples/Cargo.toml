@@ -49,7 +49,7 @@ members = [
 # Keeping them out of this workspace lets a plain `cargo build` (and rust-analyzer)
 # work here without their embedded-only toolchains. They are built separately in
 # CI against their respective targets.
-exclude = ['safe-ui', 'mcu-embassy', 'uefi-demo']
+exclude = ['esp32-c6-software-text', 'safe-ui', 'mcu-embassy', 'uefi-demo']
 
 resolver = "3"
 

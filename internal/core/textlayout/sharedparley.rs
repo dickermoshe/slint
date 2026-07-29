@@ -18,14 +18,14 @@ use crate::{
     renderer::RendererSealed,
     textlayout::{TextHorizontalAlignment, TextOverflow, TextVerticalAlignment, TextWrap},
 };
-use alloc::vec::Vec;
+use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::ops::Range;
 use core::pin::Pin;
 use euclid::num::Zero;
 use i_slint_common::sharedfontique;
 use skrifa::MetadataProvider as _;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[derive(derive_more::Deref, derive_more::DerefMut)]
@@ -33,25 +33,122 @@ pub struct FontContext {
     #[deref]
     #[deref_mut]
     pub inner: parley::FontContext,
-    /// `(ptr, len)` of each `&'static [u8]` already handed to fontique, so repeat
-    /// `register_static_font` calls for the same embedded font are skipped.
-    registered_static_fonts: HashSet<(usize, usize)>,
+    /// Stable identity and length of each static font already handed to fontique.
+    registered_static_fonts: HashSet<(u64, usize)>,
+    /// Application families in declaration order.
+    application_families: Vec<fontique::FamilyId>,
+    /// Generic family chains that preceded application font registration.
+    hosted_generic_families: HashMap<fontique::GenericFamily, Vec<fontique::FamilyId>>,
+    /// Application families, in registration order, that can cover each script.
+    application_fallbacks: HashMap<fontique::Script, Vec<fontique::FamilyId>>,
+    /// The hosted fallback that preceded application font registration for each script.
+    hosted_fallbacks: HashMap<fontique::Script, Vec<fontique::FamilyId>>,
 }
 
 impl FontContext {
     pub fn new(inner: parley::FontContext) -> Self {
-        Self { inner, registered_static_fonts: HashSet::default() }
+        Self {
+            inner,
+            registered_static_fonts: HashSet::default(),
+            application_families: Vec::default(),
+            hosted_generic_families: HashMap::default(),
+            application_fallbacks: HashMap::default(),
+            hosted_fallbacks: HashMap::default(),
+        }
     }
 
-    pub fn register_static_font(&mut self, data: &'static [u8]) {
-        let key = (data.as_ptr() as usize, data.len());
-        if self.registered_static_fonts.insert(key) {
-            self.inner.collection.register_fonts(fontique::Blob::new(Arc::new(data)), None);
+    pub fn register_static_font(
+        &mut self,
+        data: &'static [u8],
+    ) -> Result<(), sharedfontique::SoftwareFontPackageError> {
+        let (font_data, identity, package_faces) =
+            if sharedfontique::SoftwareFontPackage::has_magic(data) {
+                let package = sharedfontique::SoftwareFontPackage::parse(data)?;
+                (package.font_data, package.hash, Some(package.faces))
+            } else {
+                (data, data.as_ptr() as usize as u64, None)
+            };
+        let key = (identity, font_data.len());
+        if !self.registered_static_fonts.insert(key) {
+            return Ok(());
         }
+
+        let registered =
+            self.inner.collection.register_fonts(fontique::Blob::new(Arc::new(font_data)), None);
+        if registered.is_empty() {
+            self.registered_static_fonts.remove(&key);
+            return Err(sharedfontique::SoftwareFontPackageError::InvalidFont(
+                "the runtime rejected every face".into(),
+            ));
+        }
+        let family_ids: Vec<_> = registered.iter().map(|(family, _)| *family).collect();
+        let registered_families: Vec<_> = family_ids
+            .iter()
+            .filter_map(|family| {
+                self.inner.collection.family_name(*family).map(|name| (*family, name.to_owned()))
+            })
+            .collect();
+
+        for family in family_ids.iter().copied() {
+            if !self.application_families.contains(&family) {
+                self.application_families.push(family);
+            }
+        }
+        for generic in [
+            fontique::GenericFamily::SansSerif,
+            fontique::GenericFamily::SystemUi,
+            fontique::GenericFamily::UiSansSerif,
+        ] {
+            if !self.hosted_generic_families.contains_key(&generic) {
+                let hosted = self.inner.collection.generic_families(generic).collect();
+                self.hosted_generic_families.insert(generic, hosted);
+            }
+            let hosted = self.hosted_generic_families.get(&generic).into_iter().flatten().copied();
+            self.inner.collection.set_generic_families(
+                generic,
+                self.application_families.iter().copied().chain(hosted),
+            );
+        }
+        for &(script, sample) in fontique::Script::all_samples() {
+            let matching_families: Vec<_> = registered_families
+                .iter()
+                .filter(|(_, family_name)| {
+                    package_faces.as_ref().is_none_or(|faces| {
+                        faces.iter().any(|face| {
+                            face.family_name == *family_name
+                                && sample.chars().any(|character| face.covers(u32::from(character)))
+                        })
+                    })
+                })
+                .map(|(family, _)| *family)
+                .collect();
+            if matching_families.is_empty() {
+                continue;
+            }
+
+            let key = fontique::FallbackKey::new(script, None);
+            if !self.hosted_fallbacks.contains_key(&script) {
+                let hosted = self.inner.collection.fallback_families(key).collect();
+                self.hosted_fallbacks.insert(script, hosted);
+            }
+            let application = self.application_fallbacks.entry(script).or_default();
+            for family in matching_families {
+                if !application.contains(&family) {
+                    application.push(family);
+                }
+            }
+            let hosted = self.hosted_fallbacks.get(&script).into_iter().flatten().copied();
+            self.inner.collection.set_fallbacks(key, application.iter().copied().chain(hosted));
+        }
+        Ok(())
     }
 
     pub fn clear_registered_static_fonts(&mut self) {
         self.registered_static_fonts.clear();
+        self.application_families.clear();
+        self.hosted_generic_families.clear();
+        self.application_fallbacks.clear();
+        self.hosted_fallbacks.clear();
     }
 }
 
@@ -281,14 +378,15 @@ impl LayoutWithoutLineBreaksBuilder {
         if let Some(ref font_request) = self.font_request {
             let mut fallback_family_iter = sharedfontique::FALLBACK_FAMILIES
                 .into_iter()
-                .map(parley::style::FontFamilyName::Generic);
+                .map(parley::style::FontFamily::Generic);
 
-            let font_families: &[parley::style::FontFamilyName] = if let Some(family) =
+            let font_families: &[parley::style::FontFamily] = if let Some(family) =
                 &font_request.family
             {
-                let mut iter =
-                    core::iter::once(parley::style::FontFamilyName::named(family.as_str()))
-                        .chain(fallback_family_iter);
+                let mut iter = core::iter::once(parley::style::FontFamily::Named(
+                    std::borrow::Cow::Borrowed(family.as_str()),
+                ))
+                .chain(fallback_family_iter);
                 &core::array::from_fn::<
                     _,
                     { sharedfontique::FALLBACK_FAMILIES.as_slice().len() + 1 },
@@ -300,8 +398,8 @@ impl LayoutWithoutLineBreaksBuilder {
                 )
             };
 
-            builder.push_default(parley::style::FontFamily::List(std::borrow::Cow::Borrowed(
-                font_families,
+            builder.push_default(parley::StyleProperty::FontStack(parley::style::FontStack::List(
+                std::borrow::Cow::Borrowed(font_families),
             )));
 
             if let Some(weight) = font_request.weight {
@@ -320,9 +418,9 @@ impl LayoutWithoutLineBreaksBuilder {
         }
         builder.push_default(parley::StyleProperty::FontSize(self.pixel_size.get()));
         builder.push_default(parley::StyleProperty::WordBreak(match self.text_wrap {
-            TextWrap::NoWrap => parley::style::WordBreak::KeepAll,
-            TextWrap::WordWrap => parley::style::WordBreak::Normal,
-            TextWrap::CharWrap => parley::style::WordBreak::BreakAll,
+            TextWrap::NoWrap => parley::style::WordBreakStrength::KeepAll,
+            TextWrap::WordWrap => parley::style::WordBreakStrength::Normal,
+            TextWrap::CharWrap => parley::style::WordBreakStrength::BreakAll,
         }));
         builder.push_default(parley::StyleProperty::OverflowWrap(
             match (self.text_wrap, self.overflow_wrap_anywhere) {
@@ -397,8 +495,8 @@ impl LayoutWithoutLineBreaksBuilder {
                     }
                     Style::Code => {
                         builder.push(
-                            parley::StyleProperty::FontFamily(parley::style::FontFamily::Single(
-                                parley::style::FontFamilyName::Generic(
+                            parley::StyleProperty::FontStack(parley::style::FontStack::Single(
+                                parley::style::FontFamily::Generic(
                                     parley::style::GenericFamily::Monospace,
                                 ),
                             )),
@@ -439,6 +537,20 @@ impl LayoutWithoutLineBreaksBuilder {
                         );
                     }
                 }
+            }
+
+            for (start, control) in text.char_indices().filter(|(_, character)| {
+                matches!(
+                    character,
+                    '\u{061c}'
+                        | '\u{200e}'
+                        | '\u{200f}'
+                        | '\u{202a}'..='\u{202e}'
+                        | '\u{2066}'..='\u{2069}'
+                )
+            }) {
+                builder
+                    .push(parley::StyleProperty::FontSize(0.0), start..start + control.len_utf8());
             }
 
             builder.build(text)
@@ -540,26 +652,21 @@ fn layout(
     let max_physical_width = options.max_width.map(|max_width| max_width * scale_factor);
     let max_physical_height = options.max_height.map(|max_height| max_height * scale_factor);
 
-    // Returned None if failed to get the ellipsis glyph for some rare reason.
-    let get_ellipsis_glyph = |font_context: &mut parley::FontContext| {
-        let mut layout = layout_builder.build(font_context, "…", None, None, None);
-        layout.break_all_lines(None);
-        let line = layout.lines().next()?;
-        let item = line.items().next()?;
-        let run = match item {
-            parley::layout::PositionedLayoutItem::GlyphRun(run) => Some(run),
-            _ => return None,
-        }?;
-        let glyph = run.positioned_glyphs().next()?;
-        Some((glyph, run.run().font().clone()))
-    };
-
     let elision_info = if let (TextOverflow::Elide, Some(max_physical_width)) =
         (options.text_overflow, max_physical_width)
     {
-        get_ellipsis_glyph(font_context).map(|(ellipsis_glyph, font_for_ellipsis_glyph)| {
-            ElisionInfo { ellipsis_glyph, font_for_ellipsis_glyph, max_physical_width }
-        })
+        let indicator = ["…", "..."]
+            .into_iter()
+            .find_map(|text| shape_elision_indicator(layout_builder, font_context, text));
+        if indicator.is_none() {
+            static MISSING_ELISION_INDICATOR_WARNING: std::sync::Once = std::sync::Once::new();
+            MISSING_ELISION_INDICATOR_WARNING.call_once(|| {
+                crate::debug_log!(
+                    "No font contains U+2026 or the period glyph; truncating text without an elision indicator"
+                );
+            });
+        }
+        Some(ElisionInfo { indicator, max_physical_width })
     } else {
         None
     };
@@ -568,14 +675,13 @@ fn layout(
     for para in paragraphs.iter_mut() {
         para.layout.break_all_lines(max_physical_width.map(|width| width.get()));
         para.layout.align(
+            max_physical_width.map(PhysicalLength::get),
             match options.horizontal_align {
-                TextHorizontalAlignment::Start | TextHorizontalAlignment::Left => {
-                    parley::Alignment::Left
-                }
+                TextHorizontalAlignment::Start => parley::Alignment::Start,
+                TextHorizontalAlignment::Left => parley::Alignment::Left,
                 TextHorizontalAlignment::Center => parley::Alignment::Center,
-                TextHorizontalAlignment::End | TextHorizontalAlignment::Right => {
-                    parley::Alignment::Right
-                }
+                TextHorizontalAlignment::End => parley::Alignment::End,
+                TextHorizontalAlignment::Right => parley::Alignment::Right,
             },
             parley::AlignmentOptions::default(),
         );
@@ -608,7 +714,7 @@ fn layout(
                     .take(last_line + 1)
                     .map(|line| {
                         let metrics = line.metrics();
-                        PhysicalLength::new(metrics.inline_min_coord + metrics.advance)
+                        PhysicalLength::new(metrics.offset + metrics.advance)
                     })
                     .fold(PhysicalLength::zero(), PhysicalLength::max),
                 _ => PhysicalLength::new(p.layout.full_width()),
@@ -625,7 +731,7 @@ fn layout(
                 .lines()
                 .nth(last_line)
                 .expect("line_limit_cut returns an existing line index");
-            para.y + PhysicalLength::new(line.metrics().block_max_coord)
+            para.y + PhysicalLength::new(line.metrics().max_coord)
         }
         None => paragraphs
             .last()
@@ -653,14 +759,14 @@ fn layout(
 /// paragraph) of the last kept line. Returns `None` when all lines fit the limit, so an active
 /// cut always means that at least one line was dropped.
 fn line_limit_cut(paragraphs: &[TextParagraph], max_lines: usize) -> Option<(usize, usize)> {
-    let total_lines: usize = paragraphs.iter().map(|p| p.layout.lines().len()).sum();
+    let total_lines: usize = paragraphs.iter().map(|p| p.layout.len()).sum();
     if total_lines <= max_lines {
         return None;
     }
 
     let mut seen_lines = 0;
     for (paragraph_index, para) in paragraphs.iter().enumerate() {
-        let line_count = para.layout.lines().len();
+        let line_count = para.layout.len();
         // seen_lines < max_lines holds on entry, so the cut line index can't underflow and
         // lands within this paragraph's lines.
         if seen_lines + line_count >= max_lines {
@@ -725,10 +831,76 @@ fn get_or_create_text_paragraphs<'a>(
     }
 }
 
+struct ElisionIndicatorRun {
+    glyphs: Vec<parley::layout::Glyph>,
+    font: parley::FontData,
+    font_size: PhysicalLength,
+    normalized_coords: Vec<i16>,
+    synthesis: fontique::Synthesis,
+}
+
+struct ElisionIndicator {
+    runs: Vec<ElisionIndicatorRun>,
+    advance: f32,
+}
+
 struct ElisionInfo {
-    ellipsis_glyph: parley::layout::Glyph,
-    font_for_ellipsis_glyph: parley::FontData,
+    indicator: Option<ElisionIndicator>,
     max_physical_width: PhysicalLength,
+}
+
+struct VisualCluster {
+    start: f32,
+    end: f32,
+    trailing_whitespace: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ElisionEdge {
+    Left,
+    Right,
+}
+
+struct LineElision {
+    retained_start: f32,
+    retained_end: f32,
+    indicator_x: f32,
+    edge: ElisionEdge,
+}
+
+fn shape_elision_indicator(
+    layout_builder: &LayoutWithoutLineBreaksBuilder,
+    font_context: &mut parley::FontContext,
+    text: &str,
+) -> Option<ElisionIndicator> {
+    let mut layout = layout_builder.build(font_context, text, None, None, None);
+    layout.break_all_lines(None);
+    let line = layout.lines().next()?;
+    let mut runs = Vec::new();
+
+    for item in line.items() {
+        let parley::layout::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+            continue;
+        };
+        let baseline = glyph_run.baseline();
+        let mut glyphs = glyph_run.positioned_glyphs().collect::<Vec<_>>();
+        if glyphs.is_empty() || glyphs.iter().any(|glyph| glyph.id == 0) {
+            return None;
+        }
+        for glyph in &mut glyphs {
+            glyph.y -= baseline;
+        }
+        let run = glyph_run.run();
+        runs.push(ElisionIndicatorRun {
+            glyphs,
+            font: run.font().clone(),
+            font_size: PhysicalLength::new(run.font_size()),
+            normalized_coords: run.normalized_coords().to_vec(),
+            synthesis: run.synthesis(),
+        });
+    }
+
+    (!runs.is_empty()).then(|| ElisionIndicator { runs, advance: layout.full_width() })
 }
 
 /// Whether a line whose bottom edge is at `block_max_coord` fits within `max_physical_height`,
@@ -771,7 +943,7 @@ impl TextParagraph {
     ) {
         let para_y = layout.y_offset + self.y;
 
-        let line_count = self.layout.lines().len();
+        let line_count = self.layout.len();
 
         // For `overflow: elide` with a height limit (`overflow: clip` applies a hard pixel clip
         // instead) and for `max-lines`, `visible_extent` decides -- across all paragraphs -- the
@@ -793,8 +965,6 @@ impl TextParagraph {
             _ => (line_count.saturating_sub(1), false),
         };
 
-        self.draw_inline_code_backgrounds(item_renderer, para_y, default_text_color, last_drawn);
-
         for (index, line) in self.layout.lines().enumerate() {
             // Stop once we are past the last kept line of the last kept paragraph.
             if index > last_drawn {
@@ -806,37 +976,64 @@ impl TextParagraph {
             // account (bottom/center alignment clips lines off the top, not the bottom).
             let last_line = index == last_drawn;
             if !last_line
-                && !layout.paragraph_line_within_box(
-                    self,
-                    metrics.block_min_coord,
-                    metrics.block_max_coord,
-                )
+                && !layout.paragraph_line_within_box(self, metrics.min_coord, metrics.max_coord)
             {
                 continue;
             }
             // The last drawn line should show an ellipsis if real lines below it were dropped for
             // the height, even when it fits the width.
             let vertically_truncated = last_line && vertical_truncation;
+            let line_elision =
+                last_line.then(|| layout.line_elision(self, line, vertically_truncated)).flatten();
+            self.draw_inline_code_backgrounds_for_line(
+                item_renderer,
+                para_y,
+                default_text_color,
+                line,
+                line_elision.as_ref(),
+            );
+            let mut indicator_style_run = None;
             for item in line.items() {
                 match item {
                     parley::PositionedLayoutItem::GlyphRun(glyph_run) => {
-                        let ellipsis = if last_line {
-                            let (truncated_glyphs, ellipsis) = layout.glyphs_with_elision(
-                                &glyph_run,
-                                vertically_truncated,
-                                metrics.trailing_whitespace,
-                            );
-
+                        if let Some(line_elision) = &line_elision {
+                            let mut position = glyph_run.offset();
+                            let glyphs = glyph_run
+                                .positioned_glyphs()
+                                .filter_map(|glyph| {
+                                    let glyph_start = position;
+                                    position += glyph.advance;
+                                    (glyph_start >= line_elision.retained_start
+                                        && glyph_start < line_elision.retained_end)
+                                        .then_some(glyph)
+                                })
+                                .collect::<Vec<_>>();
+                            if glyphs.is_empty() {
+                                continue;
+                            }
+                            match line_elision.edge {
+                                ElisionEdge::Left if indicator_style_run.is_none() => {
+                                    indicator_style_run = Some(glyph_run.clone());
+                                }
+                                ElisionEdge::Right => {
+                                    indicator_style_run = Some(glyph_run.clone());
+                                }
+                                _ => {}
+                            }
                             Self::draw_glyph_run(
                                 &glyph_run,
                                 item_renderer,
                                 default_fill_brush,
                                 default_stroke_brush,
                                 para_y,
-                                &mut truncated_glyphs.into_iter(),
+                                &mut glyphs.into_iter(),
+                                Some((
+                                    glyph_run.offset().max(line_elision.retained_start),
+                                    (glyph_run.offset() + glyph_run.advance())
+                                        .min(line_elision.retained_end),
+                                )),
                                 draw_glyphs,
                             );
-                            ellipsis
                         } else {
                             Self::draw_glyph_run(
                                 &glyph_run,
@@ -845,27 +1042,26 @@ impl TextParagraph {
                                 default_stroke_brush,
                                 para_y,
                                 &mut glyph_run.positioned_glyphs(),
+                                None,
                                 draw_glyphs,
-                            );
-                            None
-                        };
-
-                        if let Some((ellipsis_glyph, ellipsis_font, font_size)) = ellipsis {
-                            let run = glyph_run.run();
-                            draw_glyphs(
-                                item_renderer,
-                                &ellipsis_font,
-                                font_size,
-                                run.normalized_coords(),
-                                &run.synthesis(),
-                                default_fill_brush.clone(),
-                                para_y,
-                                &mut core::iter::once(ellipsis_glyph),
                             );
                         }
                     }
                     parley::PositionedLayoutItem::InlineBox(_inline_box) => {}
                 };
+            }
+            if let Some(line_elision) = line_elision {
+                Self::draw_elision_indicator(
+                    layout,
+                    &line_elision,
+                    indicator_style_run.as_ref(),
+                    metrics.baseline,
+                    item_renderer,
+                    default_fill_brush,
+                    default_stroke_brush,
+                    para_y,
+                    draw_glyphs,
+                );
             }
         }
     }
@@ -874,12 +1070,13 @@ impl TextParagraph {
     /// this paragraph's `Style::Code` ranges. Capsule colors are derived from the luminance
     /// of `default_text_color`, so light and dark themes both get a sensible default
     /// without any user-facing styling property.
-    fn draw_inline_code_backgrounds<R: GlyphRenderer>(
+    fn draw_inline_code_backgrounds_for_line<R: GlyphRenderer>(
         &self,
         item_renderer: &mut R,
         para_y: PhysicalLength,
         default_text_color: Color,
-        last_drawn: usize,
+        line: parley::layout::Line<'_, Brush>,
+        line_elision: Option<&LineElision>,
     ) {
         if self.code_ranges.is_empty() {
             return;
@@ -912,75 +1109,251 @@ impl TextParagraph {
         let scale_factor = ScaleFactor::new(item_renderer.scale_factor());
         let border_width = BORDER_WIDTH * scale_factor;
 
-        // Capsules only under lines that are drawn: lines past the visible-extent cut
-        // (`overflow: elide` height limit or `max-lines`) don't render their glyphs either.
-        for line in self.layout.lines().take(last_drawn + 1) {
-            for item in line.items() {
-                let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
-                    continue;
-                };
-                let run = glyph_run.run();
-                let run_range = run.text_range();
-                if run_range.is_empty() {
-                    continue;
-                }
-                // `Style::Code` pushes its own FontFamily + FontSize, which forces a
-                // run boundary, so a code run is always fully contained in one of the
-                // recorded ranges — a single containment check is enough.
-                let is_code = self
-                    .code_ranges
-                    .iter()
-                    .any(|cr| cr.start <= run_range.start && run_range.end <= cr.end);
-                if !is_code {
-                    continue;
-                }
-
-                let metrics = run.metrics();
-                let ascent = metrics.ascent;
-                let descent = metrics.descent;
-                let cap_height = metrics.cap_height.unwrap_or(ascent * 0.72);
-
-                // Center the capsule on the midpoint between cap-top and a shallow
-                // approximation of the descender bottom (roughly where parens, commas
-                // and dots reach). This gives equal visible padding above and below
-                // for typical code text (which has caps but rarely real descenders).
-                let upper_extent = cap_height;
-                let lower_extent = descent * 0.4;
-                let center = glyph_run.baseline() + (lower_extent - upper_extent) / 2.0;
-                let inner_half_height = (upper_extent + lower_extent) / 2.0;
-                let extra_padding = ascent * VERTICAL_PADDING_RATIO;
-                let half_height = inner_half_height + extra_padding;
-                let bg_height = (half_height * 2.0).max(1.0);
-                let bg_top = center - half_height;
-
-                // Width hugs the glyphs tightly — `glyph_run.advance()` is exactly
-                // the horizontal extent of the rendered run. The underlying text is
-                // not modified, so selection, hit-testing and copy/paste keep working
-                // on the underlying characters.
-                let bg_width = glyph_run.advance().max(0.0);
-                if bg_width <= 0.0 {
-                    continue;
-                }
-                let bg_left = glyph_run.offset();
-
-                let bg_rect = PhysicalRect::new(
-                    PhysicalPoint::from_lengths(
-                        PhysicalLength::new(bg_left),
-                        PhysicalLength::new(bg_top) + para_y,
-                    ),
-                    PhysicalSize::new(bg_width, bg_height),
-                );
-                let radius = PhysicalLength::new(bg_height * 0.22)
-                    .max(MIN_RADIUS * scale_factor)
-                    .min(MAX_RADIUS * scale_factor);
-                let Some(fill_brush) = item_renderer.platform_brush_for_color(&fill) else {
-                    continue;
-                };
-                let border_brush = item_renderer
-                    .platform_brush_for_color(&border)
-                    .map(|brush| RectangleBorder { brush, width: border_width });
-                item_renderer.fill_rectangle(bg_rect, fill_brush, radius, border_brush);
+        for item in line.items() {
+            let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                continue;
+            };
+            let run = glyph_run.run();
+            let run_range = run.text_range();
+            if run_range.is_empty() {
+                continue;
             }
+            // `Style::Code` pushes its own FontFamily + FontSize, which forces a
+            // run boundary, so a code run is always fully contained in one of the
+            // recorded ranges — a single containment check is enough.
+            let is_code = self
+                .code_ranges
+                .iter()
+                .any(|cr| cr.start <= run_range.start && run_range.end <= cr.end);
+            if !is_code {
+                continue;
+            }
+
+            let metrics = run.metrics();
+            let ascent = metrics.ascent;
+            let descent = metrics.descent;
+            let cap_height = ascent * 0.72;
+
+            // Center the capsule on the midpoint between cap-top and a shallow
+            // approximation of the descender bottom (roughly where parens, commas
+            // and dots reach). This gives equal visible padding above and below
+            // for typical code text (which has caps but rarely real descenders).
+            let upper_extent = cap_height;
+            let lower_extent = descent * 0.4;
+            let center = glyph_run.baseline() + (lower_extent - upper_extent) / 2.0;
+            let inner_half_height = (upper_extent + lower_extent) / 2.0;
+            let extra_padding = ascent * VERTICAL_PADDING_RATIO;
+            let half_height = inner_half_height + extra_padding;
+            let bg_height = (half_height * 2.0).max(1.0);
+            let bg_top = center - half_height;
+
+            // Width hugs the glyphs tightly — `glyph_run.advance()` is exactly
+            // the horizontal extent of the rendered run. The underlying text is
+            // not modified, so selection, hit-testing and copy/paste keep working
+            // on the underlying characters.
+            let mut bg_left = glyph_run.offset();
+            let mut bg_right = glyph_run.offset() + glyph_run.advance();
+            if let Some(line_elision) = line_elision {
+                bg_left = bg_left.max(line_elision.retained_start);
+                bg_right = bg_right.min(line_elision.retained_end);
+            }
+            let bg_width = (bg_right - bg_left).max(0.0);
+            if bg_width <= 0.0 {
+                continue;
+            }
+
+            let bg_rect = PhysicalRect::new(
+                PhysicalPoint::from_lengths(
+                    PhysicalLength::new(bg_left),
+                    PhysicalLength::new(bg_top) + para_y,
+                ),
+                PhysicalSize::new(bg_width, bg_height),
+            );
+            let radius = PhysicalLength::new(bg_height * 0.22)
+                .max(MIN_RADIUS * scale_factor)
+                .min(MAX_RADIUS * scale_factor);
+            let Some(fill_brush) = item_renderer.platform_brush_for_color(&fill) else {
+                continue;
+            };
+            let border_brush = item_renderer
+                .platform_brush_for_color(&border)
+                .map(|brush| RectangleBorder { brush, width: border_width });
+            item_renderer.fill_rectangle(bg_rect, fill_brush, radius, border_brush);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_elision_indicator<R: GlyphRenderer>(
+        layout: &Layout,
+        line_elision: &LineElision,
+        style_source: Option<&parley::layout::GlyphRun<Brush>>,
+        baseline: f32,
+        item_renderer: &mut R,
+        default_fill_brush: &<R as GlyphRenderer>::PlatformBrush,
+        default_stroke_brush: &Option<<R as GlyphRenderer>::PlatformBrush>,
+        para_y: PhysicalLength,
+        draw_glyphs: &mut dyn FnMut(
+            &mut R,
+            &parley::FontData,
+            PhysicalLength,
+            &[i16],
+            &fontique::Synthesis,
+            <R as GlyphRenderer>::PlatformBrush,
+            PhysicalLength,
+            &mut dyn Iterator<Item = parley::layout::Glyph>,
+        ),
+    ) {
+        let Some(indicator) = layout.elision_info.as_ref().and_then(|info| info.indicator.as_ref())
+        else {
+            return;
+        };
+
+        let style = style_source.map(|glyph_run| glyph_run.style());
+        let brush = style.map(|style| &style.brush);
+        let (fill_brush, stroke_style) =
+            match brush.map(|brush| (brush.override_fill_color, brush.link_color, brush.stroke)) {
+                Some((Some(color), _, _)) => {
+                    let Some(style_brush) = item_renderer.platform_brush_for_color(&color) else {
+                        return;
+                    };
+                    (style_brush, None)
+                }
+                Some((None, Some(color), _)) => {
+                    let Some(style_brush) = item_renderer.platform_brush_for_color(&color) else {
+                        return;
+                    };
+                    (style_brush, None)
+                }
+                Some((None, None, stroke)) => (default_fill_brush.clone(), stroke),
+                None => (default_fill_brush.clone(), None),
+            };
+
+        match stroke_style {
+            Some(TextStrokeStyle::Outside) => {
+                if let Some(stroke_brush) = default_stroke_brush.clone() {
+                    Self::draw_elision_indicator_runs(
+                        indicator,
+                        line_elision.indicator_x,
+                        baseline,
+                        item_renderer,
+                        stroke_brush,
+                        para_y,
+                        draw_glyphs,
+                    );
+                }
+                Self::draw_elision_indicator_runs(
+                    indicator,
+                    line_elision.indicator_x,
+                    baseline,
+                    item_renderer,
+                    fill_brush.clone(),
+                    para_y,
+                    draw_glyphs,
+                );
+            }
+            Some(TextStrokeStyle::Center) => {
+                Self::draw_elision_indicator_runs(
+                    indicator,
+                    line_elision.indicator_x,
+                    baseline,
+                    item_renderer,
+                    fill_brush.clone(),
+                    para_y,
+                    draw_glyphs,
+                );
+                if let Some(stroke_brush) = default_stroke_brush.clone() {
+                    Self::draw_elision_indicator_runs(
+                        indicator,
+                        line_elision.indicator_x,
+                        baseline,
+                        item_renderer,
+                        stroke_brush,
+                        para_y,
+                        draw_glyphs,
+                    );
+                }
+            }
+            None => Self::draw_elision_indicator_runs(
+                indicator,
+                line_elision.indicator_x,
+                baseline,
+                item_renderer,
+                fill_brush.clone(),
+                para_y,
+                draw_glyphs,
+            ),
+        }
+
+        let Some(style_source) = style_source else {
+            return;
+        };
+        let metrics = style_source.run().metrics();
+        let decoration_size = PhysicalSize::new(indicator.advance, metrics.underline_size);
+        if style_source.style().underline.is_some() {
+            item_renderer.fill_rectangle(
+                PhysicalRect::new(
+                    PhysicalPoint::from_lengths(
+                        PhysicalLength::new(line_elision.indicator_x),
+                        para_y + PhysicalLength::new(baseline - metrics.underline_offset),
+                    ),
+                    decoration_size,
+                ),
+                fill_brush.clone(),
+                PhysicalLength::zero(),
+                None,
+            );
+        }
+        if style_source.style().strikethrough.is_some() {
+            item_renderer.fill_rectangle(
+                PhysicalRect::new(
+                    PhysicalPoint::from_lengths(
+                        PhysicalLength::new(line_elision.indicator_x),
+                        para_y + PhysicalLength::new(baseline - metrics.strikethrough_offset),
+                    ),
+                    PhysicalSize::new(indicator.advance, metrics.strikethrough_size),
+                ),
+                fill_brush,
+                PhysicalLength::zero(),
+                None,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_elision_indicator_runs<R: GlyphRenderer>(
+        indicator: &ElisionIndicator,
+        x: f32,
+        baseline: f32,
+        item_renderer: &mut R,
+        brush: <R as GlyphRenderer>::PlatformBrush,
+        para_y: PhysicalLength,
+        draw_glyphs: &mut dyn FnMut(
+            &mut R,
+            &parley::FontData,
+            PhysicalLength,
+            &[i16],
+            &fontique::Synthesis,
+            <R as GlyphRenderer>::PlatformBrush,
+            PhysicalLength,
+            &mut dyn Iterator<Item = parley::layout::Glyph>,
+        ),
+    ) {
+        for indicator_run in &indicator.runs {
+            let mut glyphs = indicator_run.glyphs.iter().copied().map(|mut glyph| {
+                glyph.x += x;
+                glyph.y += baseline;
+                glyph
+            });
+            draw_glyphs(
+                item_renderer,
+                &indicator_run.font,
+                indicator_run.font_size,
+                &indicator_run.normalized_coords,
+                &indicator_run.synthesis,
+                brush.clone(),
+                para_y,
+                &mut glyphs,
+            );
         }
     }
 
@@ -991,6 +1364,7 @@ impl TextParagraph {
         default_stroke_brush: &Option<<R as GlyphRenderer>::PlatformBrush>,
         para_y: PhysicalLength,
         glyphs_it: &mut dyn Iterator<Item = parley::layout::Glyph>,
+        decoration_range: Option<(f32, f32)>,
         draw_glyphs: &mut dyn FnMut(
             &mut R,
             &parley::FontData,
@@ -1093,16 +1467,20 @@ impl TextParagraph {
         }
 
         let metrics = run.metrics();
+        let (decoration_x, decoration_width) = decoration_range.map_or_else(
+            || (glyph_run.offset(), glyph_run.advance()),
+            |(start, end)| (start, (end - start).max(0.0)),
+        );
 
         if glyph_run.style().underline.is_some() {
             item_renderer.fill_rectangle(
                 PhysicalRect::new(
                     PhysicalPoint::from_lengths(
-                        PhysicalLength::new(glyph_run.offset()),
+                        PhysicalLength::new(decoration_x),
                         para_y
                             + PhysicalLength::new(glyph_run.baseline() - metrics.underline_offset),
                     ),
-                    PhysicalSize::new(glyph_run.advance(), metrics.underline_size),
+                    PhysicalSize::new(decoration_width, metrics.underline_size),
                 ),
                 fill_brush.clone(),
                 PhysicalLength::zero(),
@@ -1114,13 +1492,13 @@ impl TextParagraph {
             item_renderer.fill_rectangle(
                 PhysicalRect::new(
                     PhysicalPoint::from_lengths(
-                        PhysicalLength::new(glyph_run.offset()),
+                        PhysicalLength::new(decoration_x),
                         para_y
                             + PhysicalLength::new(
                                 glyph_run.baseline() - metrics.strikethrough_offset,
                             ),
                     ),
-                    PhysicalSize::new(glyph_run.advance(), metrics.strikethrough_size),
+                    PhysicalSize::new(decoration_width, metrics.strikethrough_size),
                 ),
                 fill_brush,
                 PhysicalLength::zero(),
@@ -1202,9 +1580,10 @@ impl Layout {
         let Some(max_physical_height) = self.max_physical_height else {
             return false;
         };
-        self.paragraphs.first().and_then(|paragraph| paragraph.layout.lines().next()).is_some_and(
-            |line| !line_fits_height(line.metrics().block_max_coord, max_physical_height),
-        )
+        self.paragraphs
+            .first()
+            .and_then(|paragraph| paragraph.layout.lines().next())
+            .is_some_and(|line| !line_fits_height(line.metrics().max_coord, max_physical_height))
     }
 
     /// Whether a line of `paragraph` (with the metrics block range `block_min`..`block_max` in the
@@ -1243,13 +1622,12 @@ impl Layout {
         // bottom up. Bottom/center alignment clips lines off the top, so the visible block can
         // start partway down, but its last line is always the lowest one that fits.
         let last_within_box = self.paragraphs.iter().enumerate().rev().find_map(|(pi, para)| {
-            para.layout
-                .lines()
-                .enumerate()
+            (0..para.layout.len())
                 .rev()
+                .filter_map(|li| para.layout.get(li).map(|line| (li, line)))
                 .find(|(_, line)| {
                     let m = line.metrics();
-                    self.paragraph_line_within_box(para, m.block_min_coord, m.block_max_coord)
+                    self.paragraph_line_within_box(para, m.min_coord, m.max_coord)
                 })
                 .map(|(li, _)| (pi, li))
         });
@@ -1261,7 +1639,7 @@ impl Layout {
             .iter()
             .enumerate()
             .rev()
-            .find_map(|(pi, para)| para.layout.lines().len().checked_sub(1).map(|li| (pi, li)));
+            .find_map(|(pi, para)| para.layout.len().checked_sub(1).map(|li| (pi, li)));
 
         let (last_paragraph, last_line) = last_within_box.unwrap_or((0, 0));
         let needs_ellipsis =
@@ -1383,73 +1761,95 @@ impl Layout {
         )
     }
 
-    /// Returns an iterator over the run's glyphs, truncated if necessary to fit within the max width,
-    /// plus an optional ellipsis glyph with its font and size to be drawn separately.
-    /// Call this function only for the last line of the layout.
-    fn glyphs_with_elision<'a>(
-        &'a self,
-        glyph_run: &'a parley::layout::GlyphRun<Brush>,
-        // When set, place an ellipsis even if the run fits the width. Used when lines below were
-        // dropped for the height, so the last visible line signals the vertical truncation.
+    /// Calculates one elision operation for a complete visual line.
+    ///
+    /// The retained interval always ends at a Parley cluster boundary. This keeps ligatures,
+    /// combining sequences, and shaping clusters intact even when a line contains several
+    /// differently styled or bidirectional runs.
+    fn line_elision(
+        &self,
+        paragraph: &TextParagraph,
+        line: parley::layout::Line<'_, Brush>,
         force_elision: bool,
-        // Advance width of the line's trailing whitespace. A vertically truncated line that fits
-        // the width anchors the appended ellipsis after the last non-whitespace glyph, so trailing
-        // spaces (e.g. left at a word-wrap break) don't push it away from the text.
-        trailing_whitespace: f32,
-    ) -> (
-        impl Iterator<Item = parley::layout::Glyph> + Clone + 'a,
-        Option<(parley::layout::Glyph, parley::FontData, PhysicalLength)>,
-    ) {
-        let ellipsis_advance =
-            self.elision_info.as_ref().map(|info| info.ellipsis_glyph.advance).unwrap_or(0.0);
-        let max_width = self
-            .elision_info
-            .as_ref()
-            .map(|info| info.max_physical_width)
-            .unwrap_or(PhysicalLength::new(f32::MAX));
+    ) -> Option<LineElision> {
+        let info = self.elision_info.as_ref()?;
+        let metrics = line.metrics();
+        let mut position = metrics.offset;
+        let mut clusters = Vec::new();
 
-        let run_start = PhysicalLength::new(glyph_run.offset());
-        let run_end = PhysicalLength::new(glyph_run.offset() + glyph_run.advance());
+        for run in line.runs() {
+            for cluster in run.visual_clusters() {
+                let start = position;
+                position += cluster.advance();
+                clusters.push(VisualCluster {
+                    start,
+                    end: position,
+                    trailing_whitespace: cluster.is_space_or_nbsp(),
+                });
+            }
+        }
 
-        // Run starts after where the ellipsis would go - skip entirely
-        let run_beyond_elision = run_start > max_width;
-        // Run extends beyond max width (or the lines below it were dropped) and needs an ellipsis
-        let needs_elision = !run_beyond_elision
-            && (force_elision || run_end.get().floor() > max_width.get().ceil());
+        let line_start = clusters.first().map_or(position, |cluster| cluster.start);
+        let line_end = clusters.last().map_or(position, |cluster| cluster.end);
+        let max_width = info.max_physical_width.get();
+        let overflows_left = line_start.floor() < 0.0;
+        let overflows_right = line_end.floor() > max_width.ceil();
+        if !force_elision && !overflows_left && !overflows_right {
+            return None;
+        }
 
-        let truncated_glyphs = glyph_run.positioned_glyphs().take_while(move |glyph| {
-            !run_beyond_elision
-                && (!needs_elision
-                    || PhysicalLength::new(glyph.x + glyph.advance + ellipsis_advance) <= max_width)
-        });
-
-        let ellipsis = if needs_elision {
-            self.elision_info.as_ref().map(|info| {
-                let ellipsis_x = glyph_run
-                    .positioned_glyphs()
-                    .find(|glyph| {
-                        PhysicalLength::new(glyph.x + glyph.advance + info.ellipsis_glyph.advance)
-                            > info.max_physical_width
-                    })
-                    .map(|g| g.x)
-                    // Nothing overflows horizontally (force_elision): put the ellipsis right after
-                    // the run's last non-whitespace glyph, i.e. before any trailing whitespace.
-                    .unwrap_or(run_end.get() - trailing_whitespace);
-
-                let mut ellipsis_glyph = info.ellipsis_glyph;
-                ellipsis_glyph.x = ellipsis_x;
-                // The ellipsis glyph comes from a standalone layout; place it on this run's
-                // baseline so it lands on the right line (not just the first one).
-                ellipsis_glyph.y = glyph_run.baseline();
-
-                let font_size = PhysicalLength::new(glyph_run.run().font_size());
-                (ellipsis_glyph, info.font_for_ellipsis_glyph.clone(), font_size)
-            })
-        } else {
-            None
+        let edge = match (overflows_left, overflows_right) {
+            (true, false) => ElisionEdge::Left,
+            (false, true) => ElisionEdge::Right,
+            // With overflow at both edges, and for a vertical or line-count cut, use the
+            // paragraph's inline-end edge.
+            _ if paragraph.layout.is_rtl() => ElisionEdge::Left,
+            _ => ElisionEdge::Right,
         };
+        let indicator_advance = info.indicator.as_ref().map_or(0.0, |indicator| indicator.advance);
 
-        (truncated_glyphs, ellipsis)
+        match edge {
+            ElisionEdge::Right => {
+                let available_end = (max_width - indicator_advance).max(0.0);
+                let content_end = clusters
+                    .iter()
+                    .rfind(|cluster| !cluster.trailing_whitespace)
+                    .map_or(line_start, |cluster| cluster.end);
+                let desired_end =
+                    if force_elision && !overflows_right { content_end } else { available_end };
+                let retained_end = clusters
+                    .iter()
+                    .take_while(|cluster| cluster.end <= desired_end)
+                    .last()
+                    .map_or(line_start, |cluster| cluster.end);
+                let indicator_x =
+                    retained_end.max(0.0).min((max_width - indicator_advance).max(0.0));
+                Some(LineElision {
+                    retained_start: f32::NEG_INFINITY,
+                    retained_end,
+                    indicator_x,
+                    edge,
+                })
+            }
+            ElisionEdge::Left => {
+                let content_start = clusters
+                    .iter()
+                    .find(|cluster| !cluster.trailing_whitespace)
+                    .map_or(line_end, |cluster| cluster.start);
+                let desired_start =
+                    if force_elision && !overflows_left && content_start >= indicator_advance {
+                        content_start
+                    } else {
+                        indicator_advance
+                    };
+                let retained_start = clusters
+                    .iter()
+                    .find(|cluster| cluster.start >= desired_start)
+                    .map_or(line_end, |cluster| cluster.start);
+                let indicator_x = (retained_start - indicator_advance).max(0.0);
+                Some(LineElision { retained_start, retained_end: f32::INFINITY, indicator_x, edge })
+            }
+        }
     }
 
     fn draw<R: GlyphRenderer>(
@@ -1651,8 +2051,19 @@ pub fn link_under_cursor(
         },
     );
 
+    let visible_extent = layout.visible_extent();
     let result = layout.paragraph_by_y(cursor.y_length()).and_then(|paragraph| {
-        let paragraph_y: f64 = paragraph.y.cast::<f64>().get();
+        let paragraph_index =
+            layout.paragraphs.iter().position(|candidate| core::ptr::eq(candidate, paragraph))?;
+        let paragraph_y: f64 = (layout.y_offset + paragraph.y).cast::<f64>().get();
+        let line_count = paragraph.layout.len();
+        let (last_drawn, vertical_truncation) = match visible_extent {
+            Some(cut) if paragraph_index > cut.last_paragraph => return None,
+            Some(cut) if paragraph_index == cut.last_paragraph => {
+                (cut.last_line, cut.needs_ellipsis)
+            }
+            _ => (line_count.saturating_sub(1), false),
+        };
 
         paragraph
             .links
@@ -1670,7 +2081,36 @@ pub fn link_under_cursor(
                 );
                 let mut clicked = false;
                 let link_range = parley::Selection::new(start, end);
-                link_range.geometry_with(&paragraph.layout, |mut bounding_box, _line| {
+                link_range.geometry_with(&paragraph.layout, |mut bounding_box, line_index| {
+                    if line_index > last_drawn {
+                        return;
+                    }
+                    let Some(line) = paragraph.layout.get(line_index) else {
+                        return;
+                    };
+                    let metrics = line.metrics();
+                    let last_line = line_index == last_drawn;
+                    if !last_line
+                        && !layout.paragraph_line_within_box(
+                            paragraph,
+                            metrics.min_coord,
+                            metrics.max_coord,
+                        )
+                    {
+                        return;
+                    }
+                    let line_elision = last_line
+                        .then(|| {
+                            layout.line_elision(paragraph, line, vertical_truncation && last_line)
+                        })
+                        .flatten();
+                    if let Some(line_elision) = line_elision {
+                        bounding_box.x0 = bounding_box.x0.max(line_elision.retained_start.into());
+                        bounding_box.x1 = bounding_box.x1.min(line_elision.retained_end.into());
+                        if bounding_box.x0 >= bounding_box.x1 {
+                            return;
+                        }
+                    }
                     bounding_box.y0 += paragraph_y;
                     bounding_box.y1 += paragraph_y;
                     clicked = bounding_box.union(parley::BoundingBox::new(
@@ -2115,8 +2555,54 @@ mod tests {
         layout_text_with_options(text, LayoutOptions::default())
     }
 
+    fn shape_with_font(font_data: &'static [u8], text: &str) -> parley::Layout<Brush> {
+        let mut font_context = parley::FontContext {
+            collection: fontique::Collection::new(fontique::CollectionOptions {
+                system_fonts: false,
+                ..Default::default()
+            }),
+            source_cache: Default::default(),
+        };
+        let families =
+            font_context.collection.register_fonts(fontique::Blob::new(Arc::new(font_data)), None);
+        font_context.collection.set_generic_families(
+            fontique::GenericFamily::SansSerif,
+            families.iter().map(|(family, _)| *family),
+        );
+        let builder = LayoutWithoutLineBreaksBuilder::new(
+            None,
+            TextWrap::NoWrap,
+            None,
+            ScaleFactor::new(1.0),
+        );
+        let mut layout = builder.build(&mut font_context, text, None, None, None);
+        layout.break_all_lines(None);
+        layout
+    }
+
+    fn shaping_snapshot(layout: &parley::Layout<Brush>) -> Vec<(Range<usize>, u32, i32, i32, i32)> {
+        let mut snapshot = Vec::new();
+        for line in layout.lines() {
+            for run in line.runs() {
+                for cluster in run.visual_clusters() {
+                    let range = cluster.text_range();
+                    for glyph in cluster.glyphs() {
+                        snapshot.push((
+                            range.clone(),
+                            glyph.id,
+                            (glyph.advance * 64.0).round() as i32,
+                            (glyph.x * 64.0).round() as i32,
+                            (glyph.y * 64.0).round() as i32,
+                        ));
+                    }
+                }
+            }
+        }
+        snapshot
+    }
+
     fn visual_line_count(text: &str) -> usize {
-        layout_text(text).paragraphs.iter().map(|p| p.layout.lines().len()).sum()
+        layout_text(text).paragraphs.iter().map(|p| p.layout.len()).sum()
     }
 
     #[test]
@@ -2218,7 +2704,7 @@ mod tests {
             .lines()
             .map(|line| {
                 let metrics = line.metrics();
-                metrics.inline_min_coord + metrics.advance
+                metrics.offset + metrics.advance
             })
             .fold(0.0f32, f32::max);
         assert_eq!(per_line_max, unlimited.paragraphs[0].layout.full_width());
@@ -2251,8 +2737,236 @@ mod tests {
         assert!(limited.height > PhysicalLength::zero());
         // The capped height matches the bottom of the last kept line.
         let first_line_bottom = PhysicalLength::new(
-            limited.paragraphs[0].layout.lines().next().unwrap().metrics().block_max_coord,
+            limited.paragraphs[0].layout.lines().next().unwrap().metrics().max_coord,
         );
         assert_eq!(limited.height, first_line_bottom);
+    }
+
+    #[test]
+    fn start_and_end_alignment_follow_paragraph_direction() {
+        let max_width = LogicalLength::new(200.0);
+        let rtl_start = layout_text_with_options(
+            "אב",
+            LayoutOptions {
+                max_width: Some(max_width),
+                horizontal_align: TextHorizontalAlignment::Start,
+                ..Default::default()
+            },
+        );
+        let rtl_end = layout_text_with_options(
+            "אב",
+            LayoutOptions {
+                max_width: Some(max_width),
+                horizontal_align: TextHorizontalAlignment::End,
+                ..Default::default()
+            },
+        );
+        let physical_left = layout_text_with_options(
+            "אב",
+            LayoutOptions {
+                max_width: Some(max_width),
+                horizontal_align: TextHorizontalAlignment::Left,
+                ..Default::default()
+            },
+        );
+        let physical_right = layout_text_with_options(
+            "אב",
+            LayoutOptions {
+                max_width: Some(max_width),
+                horizontal_align: TextHorizontalAlignment::Right,
+                ..Default::default()
+            },
+        );
+
+        let offset =
+            |layout: &Layout| layout.paragraphs[0].layout.lines().next().unwrap().metrics().offset;
+        assert_eq!(offset(&rtl_start), offset(&physical_right));
+        assert_eq!(offset(&rtl_end), offset(&physical_left));
+        assert!(offset(&rtl_start) > offset(&rtl_end));
+    }
+
+    #[test]
+    fn elision_cut_is_a_visual_cluster_boundary() {
+        let layout = layout_text_with_options(
+            "a\u{0301}bcdefgh",
+            LayoutOptions {
+                max_width: Some(LogicalLength::new(45.0)),
+                text_overflow: TextOverflow::Elide,
+                ..Default::default()
+            },
+        );
+        let paragraph = &layout.paragraphs[0];
+        let line = paragraph.layout.lines().next().unwrap();
+        let cut = layout.line_elision(paragraph, line, false).expect("line should overflow");
+
+        let metrics = line.metrics();
+        let mut position = metrics.offset;
+        let mut boundaries = alloc::vec![position];
+        for run in line.runs() {
+            for cluster in run.visual_clusters() {
+                position += cluster.advance();
+                boundaries.push(position);
+            }
+        }
+        assert!(
+            boundaries.iter().any(|boundary| (*boundary - cut.retained_end).abs() < f32::EPSILON)
+        );
+        assert!(cut.indicator_x >= 0.0);
+        assert!(
+            cut.indicator_x
+                + layout.elision_info.as_ref().unwrap().indicator.as_ref().unwrap().advance
+                <= 45.0
+        );
+    }
+
+    #[test]
+    fn complex_scripts_use_general_opentype_shaping() {
+        let arabic = shape_with_font(
+            include_bytes!("../../../tests/screenshots/fonts/NotoSansArabic-Variable.ttf"),
+            "لا مُدّ",
+        );
+        let hebrew = shape_with_font(
+            include_bytes!("../../../tests/screenshots/fonts/NotoSansHebrew-Variable.ttf"),
+            "שָׁלוֹם",
+        );
+        let devanagari = shape_with_font(
+            include_bytes!("../../../tests/screenshots/fonts/NotoSansDevanagari-Variable.ttf"),
+            "क्षि",
+        );
+
+        let arabic = shaping_snapshot(&arabic);
+        let hebrew = shaping_snapshot(&hebrew);
+        let devanagari = shaping_snapshot(&devanagari);
+
+        assert_eq!(
+            arabic,
+            [
+                (11..13, 368, 0, 38, -1),
+                (11..13, 29, 409, 0, 0),
+                (7..9, 372, 0, 100, -77),
+                (7..9, 79, 403, 0, 0),
+                (4..5, 3, 200, 0, 0),
+                (2..4, 10, 279, 0, 0),
+                (0..2, 73, 168, 0, 0),
+            ]
+        );
+        assert_eq!(
+            hebrew,
+            [
+                (12..14, 23, 525, 0, 0),
+                (10..12, 46, 0, 63, 0),
+                (10..12, 124, 223, -8, 0),
+                (6..8, 55, 401, 0, 0),
+                (4..6, 79, 0, 174, 0),
+                (4..6, 100, 0, 414, 0),
+                (4..6, 96, 561, 0, 0),
+            ]
+        );
+        assert_eq!(devanagari, [(0..3, 551, 199, 0, 0), (0..3, 90, 551, 0, 0)]);
+    }
+
+    #[test]
+    fn esp_ascii_hebrew_font_shapes_without_missing_glyphs() {
+        let font = include_bytes!(
+            "../../../examples/esp32-c6-software-text/fonts/NotoSansHebrew-ASCII-Embedded.ttf"
+        );
+        let layout = shape_with_font(
+            font,
+            "Slint 123 \u{05e9}\u{05b8}\u{05c1}\u{05dc}\u{05d5}\u{05b9}\u{05dd}",
+        );
+        let glyphs = shaping_snapshot(&layout);
+        assert!(!glyphs.is_empty());
+        assert!(glyphs.iter().all(|(_, glyph_id, ..)| *glyph_id != 0));
+    }
+
+    #[test]
+    fn bidi_uses_first_strong_direction_and_does_not_shape_controls() {
+        let font = include_bytes!("../../../tests/screenshots/fonts/NotoSansHebrew-Variable.ttf");
+        assert!(shape_with_font(font, "אב 123").is_rtl());
+        assert!(shape_with_font(font, "123 אב").is_rtl());
+        assert!(!shape_with_font(font, "123 ()").is_rtl());
+
+        let text = "a\u{2067}אב\u{2066}12\u{2069}\u{2069}b";
+        let layout = shape_with_font(font, text);
+        let mut saw_ltr = false;
+        let mut saw_rtl = false;
+        for line in layout.lines() {
+            for run in line.runs() {
+                saw_ltr |= !run.is_rtl();
+                saw_rtl |= run.is_rtl();
+                for cluster in run.clusters() {
+                    let source = &text[cluster.text_range()];
+                    if source.chars().all(|character| matches!(character, '\u{2066}'..='\u{2069}'))
+                    {
+                        assert_eq!(cluster.run().font_size(), 0.0);
+                    }
+                }
+            }
+        }
+        assert!(saw_ltr && saw_rtl);
+    }
+
+    #[test]
+    fn packaged_fonts_precede_hosted_fallbacks_in_declaration_order() {
+        let mut collection = fontique::Collection::new(fontique::CollectionOptions {
+            system_fonts: false,
+            ..Default::default()
+        });
+        let hosted = collection.register_fonts(
+            fontique::Blob::new(Arc::new(include_bytes!(
+                "../../common/sharedfontique/Inter-VariableFont.ttf"
+            ))),
+            None,
+        )[0]
+        .0;
+        collection
+            .set_generic_families(fontique::GenericFamily::SansSerif, core::iter::once(hosted));
+        for script in
+            [fontique::Script(*b"Arab"), fontique::Script(*b"Hebr"), fontique::Script(*b"Deva")]
+        {
+            collection
+                .set_fallbacks(fontique::FallbackKey::new(script, None), core::iter::once(hosted));
+        }
+
+        let mut context =
+            FontContext::new(parley::FontContext { collection, source_cache: Default::default() });
+        let register_package = |context: &mut FontContext, font: &[u8]| {
+            let package = sharedfontique::SoftwareFontPackage::build(font).unwrap();
+            context
+                .register_static_font(alloc::boxed::Box::leak(package.into_boxed_slice()))
+                .unwrap();
+        };
+        register_package(
+            &mut context,
+            include_bytes!("../../../tests/screenshots/fonts/NotoSansArabic-Variable.ttf"),
+        );
+        register_package(
+            &mut context,
+            include_bytes!("../../../tests/screenshots/fonts/NotoSansHebrew-Variable.ttf"),
+        );
+
+        let arabic =
+            context.collection.family_by_name("Noto Sans Arabic").expect("Arabic family").id();
+        let hebrew =
+            context.collection.family_by_name("Noto Sans Hebrew").expect("Hebrew family").id();
+        assert_eq!(
+            context
+                .collection
+                .generic_families(fontique::GenericFamily::SansSerif)
+                .collect::<Vec<_>>(),
+            [arabic, hebrew, hosted]
+        );
+        assert_eq!(
+            context.collection.fallback_families(fontique::Script(*b"Arab")).collect::<Vec<_>>(),
+            [arabic, hosted]
+        );
+        assert_eq!(
+            context.collection.fallback_families(fontique::Script(*b"Hebr")).collect::<Vec<_>>(),
+            [hebrew, hosted]
+        );
+        assert_eq!(
+            context.collection.fallback_families(fontique::Script(*b"Deva")).collect::<Vec<_>>(),
+            [hosted]
+        );
     }
 }

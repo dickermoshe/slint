@@ -82,6 +82,12 @@ pub fn decimal_separator_for_locale(locale: &str) -> char {
         .unwrap_or(DEFAULT_DECIMAL_SEPARATOR)
 }
 
+/// Returns the default decimal separator when locale data is not compiled in.
+#[cfg(not(feature = "locale-decimal-separator"))]
+pub fn decimal_separator_for_locale(_locale: &str) -> char {
+    DEFAULT_DECIMAL_SEPARATOR
+}
+
 /// Detect the native style depending on the platform
 pub fn get_native_style(has_qt: bool, target: &str) -> &'static str {
     // NOTE: duplicated in api/cpp/CMakeLists.txt

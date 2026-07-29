@@ -1168,8 +1168,7 @@ impl WindowInner {
         // NFC-normalize the event text so that shortcut matching works consistently
         // regardless of the composed/decomposed form the backend provides
         // (e.g. é as U+00E9 vs e + U+0301).
-        // Note: icu_normalizer is currently only enabled if parley is enabled
-        #[cfg(feature = "shared-parley")]
+        #[cfg(feature = "unicode-normalization")]
         {
             let normalizer = icu_normalizer::ComposingNormalizer::new_nfc();
             let normalized = normalizer.normalize(&internal_key_event.key_event.text);

@@ -36,11 +36,12 @@ std = [
   "chrono/clock",
   "dep:sys-locale",
   "shared-fontique",
-  "i-slint-common/locale-decimal-separator",
   "i-slint-common/color-parsing",
   "i-slint-common/markdown",
   "taffy/std",
 ]
+locale-decimal-separator = ["i-slint-common/locale-decimal-separator"]
+unicode-normalization = ["dep:icu_normalizer"]
 # Unsafe feature meaning that there is only one core running and all thread_local are static.
 # You can only enable this feature if you are sure that any API of this crate is only called
 # from a single core, and not in a interrupt or signal handler.
@@ -78,7 +79,14 @@ log = ["dep:log"]
 tr = ["dep:tr"]
 
 32-bit-color = []
-default = ["std", "unicode", "shared-parley"]
+default = [
+  "std",
+  "unicode",
+  "shared-parley",
+  "system-fonts",
+  "locale-decimal-separator",
+  "unicode-normalization",
+]
 
 # System tray (`SystemTrayIcon`) support. On Linux/BSD this pulls `ksni`; on
 # other platforms it gates the native backend. When disabled, `SystemTrayIcon`
@@ -87,7 +95,14 @@ default = ["std", "unicode", "shared-parley"]
 # user-facing crates list it in their own `default` so it stays on out of the box.
 system-tray = ["dep:ksni", "dep:async-channel", "ksni/async-io", "ksni/blocking"]
 
-shared-parley = ["shared-fontique", "dep:parley", "dep:skrifa", "dep:icu_normalizer"]
+shared-parley = [
+  "shared-fontique",
+  "dep:parley",
+  "parley/libm",
+  "dep:skrifa",
+]
+
+system-fonts = ["shared-fontique", "i-slint-common/system-fonts", "parley?/system"]
 
 shared-swash = ["dep:swash"]
 
@@ -130,7 +145,7 @@ unicode-linebreak = { version = "0.1.5", optional = true }
 unicode-script = { version = "0.5.7", optional = true }
 icu_normalizer = { workspace = true, optional = true }
 sys-locale = { version = "0.3.2", optional = true, features = ["js"] }
-parley = { version = "0.11.0", optional = true, features = ["complex-scripts"] }
+parley = { version = "0.7.0", optional = true, default-features = false }
 
 image = { workspace = true, optional = true, default-features = false }
 clru = { workspace = true, optional = true }

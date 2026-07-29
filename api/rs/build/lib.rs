@@ -82,9 +82,10 @@ pub enum EmbedResourcesKind {
     /// The files referenced from .slint files are embedded in the binary as-is (for example
     /// a PNG stays compressed), and decoded at run-time.
     EmbedFiles,
-    #[cfg(feature = "renderer-software")]
-    /// Images and fonts are pre-processed at compile time and embedded as uncompressed pixel
-    /// data, ready to be drawn by the software renderer without any decoding at run-time.
+    #[cfg(any(feature = "renderer-software", feature = "renderer-software-embedded-fonts"))]
+    /// Images and fonts are prepared at compile time for the software renderer. Images are
+    /// embedded as decoded pixel data. Fonts are validated and packaged with their complete
+    /// OpenType data so arbitrary run-time strings can be shaped and rasterized.
     ///
     /// Useful for MCUs with no file system and little RAM.
     /// Only the Slint software renderer can use these resources; Skia and FemtoVG can't.
@@ -170,7 +171,10 @@ impl CompilerConfiguration {
             EmbedResourcesKind::EmbedFiles => {
                 i_slint_compiler::EmbedResourcesKind::EmbedAllResources
             }
-            #[cfg(feature = "renderer-software")]
+            #[cfg(any(
+                feature = "renderer-software",
+                feature = "renderer-software-embedded-fonts"
+            ))]
             EmbedResourcesKind::EmbedForSoftwareRenderer => {
                 i_slint_compiler::EmbedResourcesKind::EmbedTextures
             }
@@ -180,8 +184,7 @@ impl CompilerConfiguration {
 
     /// Sets the scale factor to be applied to all `px` to `phx` conversions
     /// as constant value. This is only intended for MCU environments. Use
-    /// in combination with [`Self::embed_resources`] to pre-scale images and glyphs
-    /// accordingly.
+    /// in combination with [`Self::embed_resources`] to pre-scale images accordingly.
     ///
     /// If this is set, changing the scale factor at runtime will not have any effect.
     #[must_use]
@@ -258,16 +261,10 @@ impl CompilerConfiguration {
         config.rust_module = Some(rust_module.to_string());
         Self { config }
     }
-    /// Configures the compiler to use Signed Distance Field (SDF) encoding for fonts.
+    /// Compatibility setting for the former Signed Distance Field (SDF) font encoding.
     ///
-    /// This flag only takes effect when `embed_resources` is set to [`EmbedResourcesKind::EmbedForSoftwareRenderer`],
-    /// and requires the `sdf-fonts` cargo feature to be enabled.
-    ///
-    /// [SDF](https://en.wikipedia.org/wiki/Signed_distance_function) reduces the binary size by
-    /// using an alternative representation for fonts, trading off some rendering quality
-    /// for a smaller binary footprint.
-    /// Rendering is slower and may result in slightly inferior visual output.
-    /// Use this on systems with limited flash memory.
+    /// The software renderer now packages complete OpenType fonts and rasterizes shaped glyphs
+    /// on demand. This setting is retained for source compatibility and has no effect.
     #[cfg(feature = "sdf-fonts")]
     #[must_use]
     pub fn with_sdf_fonts(self, enable: bool) -> Self {
@@ -532,7 +529,6 @@ pub fn compile_with_config(
     }
 
     println!("cargo:rerun-if-env-changed=SLINT_STYLE");
-    println!("cargo:rerun-if-env-changed=SLINT_FONT_SIZES");
     println!("cargo:rerun-if-env-changed=SLINT_SCALE_FACTOR");
     println!("cargo:rerun-if-env-changed=SLINT_ASSET_SECTION");
     println!("cargo:rerun-if-env-changed=SLINT_EMBED_RESOURCES");

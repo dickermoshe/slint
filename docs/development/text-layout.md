@@ -1,563 +1,202 @@
-# Text Layout System
+# Text layout system
 
 > Note for AI coding assistants (agents):
 > **When to load this document:** Working on `internal/core/textlayout.rs`,
-> `internal/core/textlayout/`, `internal/core/styled_text.rs`,
-> text rendering, line breaking, or font handling.
+> `internal/core/textlayout/`, `internal/core/styled_text.rs`, text rendering,
+> line breaking, or font handling.
 > For general build commands and project structure, see `/AGENTS.md`.
 
 ## Overview
 
-Slint's text layout system handles the complex process of converting text strings into positioned glyphs for rendering. It supports:
+The standard-library software renderer uses one display-text pipeline for plain,
+styled, and input text:
 
-- **Text shaping**: Converting characters to glyphs with proper metrics
-- **Script-aware boundaries**: Splitting text by Unicode script for font selection
-- **Line breaking**: Unicode-compliant line break algorithm
-- **Text wrapping**: Word wrap, character wrap, and no wrap modes
-- **Text overflow**: Clipping and elision (ellipsis)
-- **Styled text**: Markdown parsing with formatting spans
+```text
+UTF-8 text
+    -> paragraph and bidi analysis
+    -> font matching and cluster-safe fallback
+    -> OpenType shaping
+    -> line breaking, wrapping, alignment, and elision
+    -> glyph-ID rasterization
+    -> software pixel blending
+```
 
-## Key Files
+Parley coordinates paragraph analysis, bidi, shaping, fallback, and line layout.
+Harfrust performs OpenType shaping through Parley. Fontique matches font faces and
+fallbacks. Skrifa reads font metadata, and Swash rasterizes positioned glyph IDs.
+
+The same Parley layout feeds measurement and painting. Do not introduce a
+script-specific renderer or a scalar-to-glyph shortcut for display text.
+
+## Key files
 
 | File | Purpose |
 |------|---------|
-| `internal/core/textlayout.rs` | Main layout algorithms, TextParagraphLayout |
-| `internal/core/textlayout/shaping.rs` | TextShaper trait, Glyph, ShapeBuffer |
-| `internal/core/textlayout/linebreaker.rs` | TextLineBreaker, TextLine |
-| `internal/core/textlayout/fragments.rs` | TextFragment, fragment iteration |
-| `internal/core/textlayout/glyphclusters.rs` | Glyph cluster grouping |
-| `internal/core/textlayout/linebreak_unicode.rs` | Unicode line break algorithm |
-| `internal/core/styled_text.rs` | Public `StyledText` API, FFI |
-| `internal/common/styled_text.rs` | Markdown/HTML parsing, `Style`/`FormattedSpan`/`StyledTextParagraph` |
-
-## Text Layout Pipeline
-
-```
-Input Text
-    │
-    ▼
-┌─────────────────────────────┐
-│ 1. Script Boundary Detection│  ShapeBoundaries
-│    Split by Unicode script  │  (e.g., Latin vs Arabic)
-└─────────────┬───────────────┘
-              │
-              ▼
-┌─────────────────────────────┐
-│ 2. Text Shaping             │  TextShaper::shape_text()
-│    Characters → Glyphs      │  (rustybuzz, platform shaper)
-│    Apply letter spacing     │
-└─────────────┬───────────────┘
-              │
-              ▼
-┌─────────────────────────────┐
-│ 3. Glyph Clustering         │  GlyphClusterIterator
-│    Group glyphs by source   │  (combining chars, ligatures)
-└─────────────┬───────────────┘
-              │
-              ▼
-┌─────────────────────────────┐
-│ 4. Fragment Creation        │  TextFragmentIterator
-│    Group clusters between   │  LineBreakIterator
-│    break opportunities      │
-└─────────────┬───────────────┘
-              │
-              ▼
-┌─────────────────────────────┐
-│ 5. Line Breaking            │  TextLineBreaker
-│    Fit fragments to width   │  WordWrap/CharWrap/NoWrap
-│    Handle elision           │
-└─────────────┬───────────────┘
-              │
-              ▼
-┌─────────────────────────────┐
-│ 6. Paragraph Layout         │  TextParagraphLayout
-│    Vertical/horizontal      │  layout_lines()
-│    alignment, selection     │
-└─────────────────────────────┘
-```
-
-## Core Types
-
-### Glyph
-
-Represents a single shaped glyph:
-
-```rust
-pub struct Glyph<Length> {
-    pub advance: Length,           // Horizontal advance
-    pub offset_x: Length,          // X offset from origin
-    pub offset_y: Length,          // Y offset from origin
-    pub glyph_id: Option<NonZeroU16>,  // Font-specific glyph ID
-    pub text_byte_offset: usize,   // Byte offset in source string
-}
-```
-
-### TextShaper Trait
-
-Interface for platform-specific text shaping:
-
-```rust
-pub trait TextShaper {
-    type LengthPrimitive;  // e.g., f32
-    type Length;           // e.g., f32 or LogicalLength
-
-    /// Shape text and append glyphs to storage
-    fn shape_text<GlyphStorage: Extend<Glyph<Self::Length>>>(
-        &self,
-        text: &str,
-        glyphs: &mut GlyphStorage,
-    );
-
-    /// Get glyph for a single character (e.g., ellipsis)
-    fn glyph_for_char(&self, ch: char) -> Option<Glyph<Self::Length>>;
-
-    /// Calculate max lines that fit in height
-    fn max_lines(&self, max_height: Self::Length) -> usize;
-}
-```
-
-### FontMetrics Trait
-
-Font measurement interface:
-
-```rust
-pub trait FontMetrics<Length> {
-    fn height(&self) -> Length { self.ascent() - self.descent() }
-    fn ascent(&self) -> Length;   // Distance above baseline
-    fn descent(&self) -> Length;  // Distance below baseline (negative)
-    fn x_height(&self) -> Length; // Height of lowercase 'x'
-    fn cap_height(&self) -> Length; // Height of capital letters
-}
-```
-
-### AbstractFont
-
-Combined trait for fonts:
-
-```rust
-pub trait AbstractFont: TextShaper + FontMetrics<<Self as TextShaper>::Length> {}
-```
-
-## Script Boundary Detection
-
-The `ShapeBoundaries` iterator splits text by Unicode script for optimal font selection:
-
-```rust
-pub struct ShapeBoundaries<'a> {
-    text: &'a str,
-    chars: core::str::CharIndices<'a>,
-    last_script: Option<unicode_script::Script>,
-}
-
-// Example: "Hello தோசை" splits into:
-// ["Hello "] (Latin/Common)
-// ["தோசை"]   (Tamil)
-```
-
-**Why it matters:**
-- Different scripts may need different fonts
-- Shaping rules differ by script (e.g., Arabic ligatures)
-- Allows fallback font selection per script
-
-## Shape Buffer
-
-Holds shaped glyphs organized by text runs:
-
-```rust
-pub struct ShapeBuffer<Length> {
-    pub glyphs: Vec<Glyph<Length>>,
-    pub text_runs: Vec<TextRun>,
-}
-
-pub struct TextRun {
-    pub byte_range: Range<usize>,   // Source text range
-    pub glyph_range: Range<usize>,  // Glyphs for this run
-}
-```
-
-Letter spacing is applied during shaping:
-- Added to advance of last glyph in each grapheme cluster
-- Preserves proper spacing between characters
-
-## Line Breaking
-
-### Line Break Opportunities
-
-Uses Unicode Line Break Algorithm (UAX #14) or simple ASCII fallback:
-
-```rust
-pub enum BreakOpportunity {
-    Allowed,    // Can break here (e.g., after space)
-    Mandatory,  // Must break here (e.g., newline)
-}
-```
-
-### Text Fragments
-
-Fragments are units between break opportunities:
-
-```rust
-pub struct TextFragment<Length> {
-    pub byte_range: Range<usize>,
-    pub glyph_range: Range<usize>,
-    pub width: Length,
-    pub trailing_whitespace_width: Length,
-    pub trailing_whitespace_bytes: usize,
-    pub trailing_mandatory_break: bool,
-}
-```
-
-**Whitespace handling:**
-- Trailing whitespace width tracked separately
-- Allows line to exceed width by trailing whitespace
-- Whitespace at line end not counted for alignment
-
-### TextLine
-
-Represents a laid-out line:
-
-```rust
-pub struct TextLine<Length> {
-    pub byte_range: Range<usize>,        // Source text (excluding trailing WS)
-    pub trailing_whitespace_bytes: usize,
-    pub(crate) glyph_range: Range<usize>,
-    trailing_whitespace: Length,
-    pub(crate) text_width: Length,
-}
-
-impl TextLine {
-    pub fn width_including_trailing_whitespace(&self) -> Length;
-    pub fn line_text<'a>(&self, paragraph: &'a str) -> &'a str;
-    pub fn is_empty(&self) -> bool;
-}
-```
-
-### TextLineBreaker
-
-Iterator that breaks text into lines:
-
-```rust
-pub struct TextLineBreaker<'a, Font: TextShaper> {
-    fragments: TextFragmentIterator<'a, Font::Length>,
-    available_width: Option<Font::Length>,
-    current_line: TextLine<Font::Length>,
-    num_emitted_lines: usize,
-    mandatory_line_break_on_next_iteration: bool,
-    max_lines: Option<usize>,
-    text_wrap: TextWrap,
-}
-```
-
-**Wrap modes:**
-- `TextWrap::NoWrap`: Single line, no wrapping
-- `TextWrap::WordWrap`: Break at word boundaries, fallback to anywhere
-- `TextWrap::CharWrap`: Break anywhere (character boundaries)
-
-**Break anywhere fallback:**
-When a word doesn't fit even on its own line, WordWrap falls back to breaking anywhere.
-
-## Paragraph Layout
-
-### TextParagraphLayout
-
-Full paragraph layout with alignment:
-
-```rust
-pub struct TextParagraphLayout<'a, Font: AbstractFont> {
-    pub string: &'a str,
-    pub layout: TextLayout<'a, Font>,
-    pub max_width: Font::Length,
-    pub max_height: Font::Length,
-    pub horizontal_alignment: TextHorizontalAlignment,
-    pub vertical_alignment: TextVerticalAlignment,
-    pub wrap: TextWrap,
-    pub overflow: TextOverflow,
-    pub single_line: bool,
-}
-```
-
-### layout_lines()
-
-Main layout function - iterates over positioned glyphs:
-
-```rust
-pub fn layout_lines<R>(
-    &self,
-    mut line_callback: impl FnMut(
-        &mut dyn Iterator<Item = PositionedGlyph<Font::Length>>,
-        Font::Length,     // line_x
-        Font::Length,     // line_y
-        &TextLine<Font::Length>,
-        Option<Range<Font::Length>>,  // selection
-    ) -> ControlFlow<R>,
-    selection: Option<Range<usize>>,  // byte range
-) -> Result<Font::Length, R>;  // Returns baseline_y
-```
-
-### PositionedGlyph
-
-Final glyph with absolute position:
-
-```rust
-pub struct PositionedGlyph<Length> {
-    pub x: Length,              // X position relative to line
-    pub y: Length,              // Y position (usually 0)
-    pub advance: Length,
-    pub glyph_id: NonZeroU16,
-    pub text_byte_offset: usize,
-}
-```
-
-### Alignment
-
-**Horizontal:**
-- `Left`: x = 0
-- `Center`: x = (max_width - text_width) / 2
-- `Right`: x = max_width - text_width
-
-**Vertical:**
-- `Top`: baseline_y = 0
-- `Center`: baseline_y = (max_height - text_height) / 2
-- `Bottom`: baseline_y = max_height - text_height
-
-### Text Overflow
-
-**Clip:** Text is simply clipped at boundaries
-
-**Elide:** Ellipsis (…) replaces truncated text:
-```rust
-// Elision logic:
-// 1. Get ellipsis glyph width
-// 2. When line width + next glyph > max_width - ellipsis_width:
-//    - Replace remaining with ellipsis
-// 3. Also elide last visible line when more lines exist
-```
-
-## Cursor Positioning
-
-### cursor_pos_for_byte_offset()
-
-Get cursor position for text offset:
-
-```rust
-pub fn cursor_pos_for_byte_offset(
-    &self,
-    byte_offset: usize,
-) -> (Font::Length, Font::Length)  // (x, y)
-```
-
-### byte_offset_for_position()
-
-Get text offset for click position:
-
-```rust
-pub fn byte_offset_for_position(
-    &self,
-    (pos_x, pos_y): (Font::Length, Font::Length),
-) -> usize
-```
-
-**Click position logic:**
-- Find line by y position
-- Iterate glyphs to find x position
-- If click is in left half of glyph → return glyph offset
-- If click is in right half → return next glyph offset
-
-## Styled Text
-
-`Style`, `FormattedSpan`, and `StyledTextParagraph` are defined in
-`internal/common/styled_text.rs` (crate `i-slint-common`, behind the `markdown` feature),
-not `internal/core/styled_text.rs` — the core file only re-exports `StyledTextParagraph`
-and adds the public `StyledText` API and FFI.
-
-### Style Types
-
-```rust
-pub enum Style {
-    Emphasis,       // *italic*
-    Strong,         // **bold**
-    Strikethrough,  // ~~strikethrough~~
-    Code,           // `code`
-    Link,           // [text](url)
-    Underline,      // <u>underline</u>
-    Color(u32),     // <span style="color:...">, ARGB-encoded
-}
-```
-
-### StyledTextParagraph
-
-```rust
-pub struct StyledTextParagraph {
-    pub text: String,                              // Raw text
-    pub formatting: Vec<FormattedSpan>,            // Style ranges
-    pub links: Vec<(Range<usize>, String)>,        // Link destinations
-}
-
-pub struct FormattedSpan {
-    pub range: Range<usize>,  // Byte range in text
-    pub style: Style,
-}
-```
-
-### StyledText
-
-```rust
-pub struct StyledText {
-    pub(crate) paragraphs: SharedVector<StyledTextParagraph>,
-}
-
-impl StyledText {
-    /// Create styled text from plain text without markdown parsing.
-    pub fn from_plain_text(text: &str) -> Self;
-
-    /// Parse markdown into styled text.
-    pub fn from_markdown(markdown: &str) -> Result<Self, StyledTextFromMarkdownError>;
-}
-```
-
-**Supported Markdown:**
-- `*emphasis*` / `_emphasis_`
-- `**strong**` / `__strong__`
-- `~~strikethrough~~`
-- `[link](url)`
-- Lists (ordered and unordered)
-- Soft/hard breaks
-
-**Supported HTML:**
-- `<u>underline</u>`
-- `<span style="color:...">colored</span>`
-
-## Common Patterns
-
-### Measuring Text
-
-```rust
-let layout = TextLayout { font: &font, letter_spacing: None };
-let (width, height) = layout.text_size(
-    "Hello World",
-    Some(max_width),  // None for unconstrained
-    TextWrap::WordWrap,
-);
-```
-
-### Rendering Text
-
-```rust
-let paragraph = TextParagraphLayout {
-    string: text,
-    layout: TextLayout { font: &font, letter_spacing: None },
-    max_width: 200.0,
-    max_height: 100.0,
-    horizontal_alignment: TextHorizontalAlignment::Left,
-    vertical_alignment: TextVerticalAlignment::Top,
-    wrap: TextWrap::WordWrap,
-    overflow: TextOverflow::Elide,
-    single_line: false,
-};
-
-paragraph.layout_lines::<()>(
-    |glyphs, line_x, line_y, line, selection| {
-        for glyph in glyphs {
-            draw_glyph(
-                glyph.glyph_id,
-                line_x + glyph.x,
-                line_y,
-            );
-        }
-        ControlFlow::Continue(())
-    },
-    None,  // selection
-).ok();
-```
-
-### Implementing TextShaper
-
-```rust
-impl TextShaper for MyFont {
-    type LengthPrimitive = f32;
-    type Length = f32;
-
-    fn shape_text<G: Extend<Glyph<f32>>>(&self, text: &str, glyphs: &mut G) {
-        // Use rustybuzz or platform shaper
-        let buffer = rustybuzz::UnicodeBuffer::new();
-        buffer.push_str(text);
-        let output = rustybuzz::shape(&self.face, &[], buffer);
-
-        for (info, pos) in output.glyph_infos().iter()
-            .zip(output.glyph_positions())
-        {
-            glyphs.extend(std::iter::once(Glyph {
-                glyph_id: NonZeroU16::new(info.glyph_id as u16),
-                advance: pos.x_advance as f32,
-                offset_x: pos.x_offset as f32,
-                offset_y: pos.y_offset as f32,
-                text_byte_offset: info.cluster as usize,
-            }));
-        }
-    }
-
-    fn glyph_for_char(&self, ch: char) -> Option<Glyph<f32>> {
-        let glyph_id = self.face.glyph_index(ch)?;
-        // ... build glyph
-    }
-
-    fn max_lines(&self, max_height: f32) -> usize {
-        (max_height / self.height()).floor() as usize
-    }
-}
-```
-
-## Feature Flags
-
-| Feature | Effect |
-|---------|--------|
-| `unicode-linebreak` | Full Unicode line break algorithm |
-| `unicode-script` | Script boundary detection for font selection |
-| `shared-parley` | Parley text shaping integration |
-| `std` | Markdown parsing (pulldown-cmark) |
-
-## Debugging Tips
-
-### Common Issues
-
-| Issue | Cause | Solution |
-|-------|-------|----------|
-| Missing glyphs | Font doesn't cover script | Check script boundaries, font fallback |
-| Wrong line breaks | Unicode linebreak rules | Check BreakOpportunity detection |
-| Alignment off | Trailing whitespace counted | Check width_including_trailing_whitespace |
-| Elision wrong | Ellipsis width not subtracted | Check max_width_without_elision |
-| Cursor position wrong | Byte vs glyph offset mismatch | Check text_byte_offset mapping |
-
-### Inspecting Layout
-
-```rust
-// Debug line breaking
-for line in TextLineBreaker::new(text, &shape_buffer, Some(width), None, wrap) {
-    println!("Line: {:?} width={:?}", line.line_text(text), line.text_width);
-}
-
-// Debug fragments
-for fragment in TextFragmentIterator::new(text, &shape_buffer) {
-    println!("Fragment: {:?}", fragment);
-}
-
-// Debug glyphs
-for glyph in &shape_buffer.glyphs {
-    println!("Glyph: id={:?} advance={:?} offset={}",
-             glyph.glyph_id, glyph.advance, glyph.text_byte_offset);
-}
-```
-
-## Testing
+| `internal/core/textlayout/sharedparley.rs` | Unified shaping, layout, measurement, hit geometry, and painting |
+| `internal/common/sharedfontique.rs` | Shared Fontique collection and hosted-font configuration |
+| `internal/common/sharedfontique/font_package.rs` | Versioned embedded-font package and bounds-checked parser |
+| `internal/compiler/passes/embed_glyphs.rs` | Compile-time font validation, packaging, and generated registration |
+| `internal/renderers/software/fonts/vectorfont.rs` | Swash glyph-ID rasterization and renderer-owned glyph caching |
+| `internal/renderers/software/fonts/systemfonts.rs` | Swash face cache and optional hosted font-path registration |
+| `internal/renderers/software/lib.rs` | Software paint integration |
+| `internal/common/styled_text.rs` | Markdown and HTML spans, link ranges, and paragraph data |
+
+The older files under `internal/core/textlayout/` still support the legacy
+no-standard-library bitmap-font configuration. They are not the standard
+software renderer's display-text path.
+
+## Embedded fonts
+
+Applications continue importing fonts from `.slint` files and selecting
+`EmbedForSoftwareRenderer` in `slint-build`.
+
+For that configuration, the compiler:
+
+1. Reads each imported OpenType file once.
+2. Validates every face, Unicode character map, and outline format.
+3. Records family, style, weight, width, metrics, variation axes, coverage
+   ranges, and selected script coverage.
+4. Stores the complete original font bytes in a versioned package.
+5. Emits font registration before initial component layout.
+
+Keeping the complete font preserves GSUB, GPOS, GDEF, outlines, metrics,
+variations, and hinting for arbitrary run-time strings. The package parser
+checks all lengths and offsets and verifies the font-data hash before
+registration.
+
+Package metadata is stable Slint-owned data. The parser checks separate hashes
+for the manifest and original font data. Do not serialize Fontique, Parley,
+Harfrust, Skrifa, or Swash objects.
+
+## Font matching and fallback
+
+`FontContext::register_static_font()` accepts both packaged and raw static fonts.
+Packaged coverage metadata determines which application families enter each
+script fallback chain.
+
+Fallback order is:
+
+1. The requested named family.
+2. The closest face in that family.
+3. Packaged application families in declaration order.
+4. Hosted fonts when system discovery is enabled.
+5. The selected face's `.notdef` glyph.
+
+Fontique and Parley keep fallback cluster-safe. A selected `FontData`, face
+index, variation coordinates, and synthesis settings remain attached to each
+shaped run through rasterization.
+
+ESP-IDF builds enable the in-memory text engine without Fontique's `system`
+feature. They do not scan environment paths or the file system. Desktop
+backends enable system discovery separately.
+
+## Paragraph layout
+
+`create_text_paragraphs()` splits explicit newlines without changing source byte
+ranges. `LayoutWithoutLineBreaksBuilder` applies:
+
+- requested family, size, weight, style, and letter spacing;
+- styled spans and link brushes;
+- word, character, or no-wrap behavior;
+- zero font size for bidi formatting controls, which keeps them in bidi
+  analysis without painting glyphs.
+
+Parley applies Unicode bidi and OpenType shaping. Visual runs retain logical
+cluster ranges. Paragraph direction uses the Unicode first-strong rule, with
+neutral-only text remaining left-to-right.
+
+Alignment has distinct logical and physical forms:
+
+- `start` and `end` use the paragraph direction;
+- `left` and `right` use physical edges;
+- `center` uses the physical center.
+
+`text_size()`, `text_content_widths()`, and painting all consume Parley layout
+results. Wrapping and elision operate on shaped cluster advances, never Unicode
+scalar widths.
+
+## Painting and caching
+
+`GlyphRenderer::draw_glyph_run()` receives:
+
+- the resolved font blob and face index;
+- effective pixel size;
+- normalized variation coordinates;
+- synthesis parameters;
+- positioned glyph IDs, advances, and offsets.
+
+The normal software renderer passes glyph IDs to Swash.
+It does not map Unicode characters again during painting.
+
+Flash-constrained targets can select
+`renderer-software-embedded-ttf-only`.
+This profile keeps the same Parley layout and passes the same positioned glyph
+IDs to a small `ttf-parser` and Zeno rasterizer.
+It accepts only static TrueType `glyf` outlines and does not include hinting,
+CFF, CFF2, variable-font, color-font, or bitmap-font rasterization.
+Faux italic uses an outline transform, and faux bold expands the rendered alpha
+mask.
+Unsupported or malformed faces return no glyph bitmap without panicking.
+
+The glyph cache belongs to `SoftwareRenderer`. Its key includes font identity,
+face index, glyph ID, pixel size, variation coordinates, subpixel position, and
+synthesis settings. Scale changes invalidate text layout caches. Renderer
+ownership makes the cache measurable and allows full-buffer and render-by-line
+painting to share it.
+
+## Elision
+
+Elision is calculated once for the complete final visible line after visual
+layout. `Layout::line_elision()`:
+
+1. Detects the overflowing visual edge.
+2. Reserves the independently shaped indicator width.
+3. Finds a retained interval at visual-cluster boundaries.
+4. Uses the paragraph inline-end edge if both edges overflow.
+
+The indicator preference is U+2026, then three periods. Glyph ID zero rejects an
+indicator candidate. If neither candidate is available, text is truncated and a
+deduplicated diagnostic is emitted.
+
+Painting applies the retained interval to glyphs, decorations, inline-code
+backgrounds, and link hit geometry. The indicator is painted once on the
+line's baseline.
+
+## Text input boundary
+
+Text input uses the same layout and glyph painting engine for visual
+consistency. Existing editing logic still owns caret movement, selection
+affinity, deletion, IME behavior, and other editing semantics. Do not treat
+those editing algorithms as a second display-text renderer.
+
+## Tests
+
+Focused commands:
 
 ```sh
-# Run text layout tests
-cargo test -p i-slint-core textlayout
-
-# Run with specific test
-cargo test -p i-slint-core test_elision
-cargo test -p i-slint-core test_basic_line_break
-
-# Run styled text tests
-cargo test -p i-slint-core styled_text
+cargo test -p i-slint-common --features shared-fontique font_package
+cargo test -p i-slint-core --lib textlayout::sharedparley::tests
+cargo check -p i-slint-renderer-software --no-default-features --features std
+cargo check -p i-slint-renderer-software --no-default-features --features std,swash-rasterizer
+cargo check -p i-slint-renderer-software --no-default-features --features std,embedded-ttf-only
 ```
+
+The complex-script screenshot case is
+`tests/screenshots/cases/text/complex-script-layout.slint`. It covers Arabic,
+Hebrew, Devanagari, mixed-direction text, marks, variable weight, wrapping, and
+elision in full-buffer and render-by-line software rendering.
+
+The static TrueType-only profile has a separate ASCII and Hebrew reference at
+`tests/screenshots/cases/text/embedded-ttf-hebrew.slint`.
+Run it with:
+
+```sh
+cargo test --manifest-path tests/Cargo.toml -p test-driver-screenshots \
+    --no-default-features --features software-embedded-ttf-only \
+    embedded_ttf_hebrew
+```
+
+When changing shaping or fallback, compare glyph IDs, logical cluster ranges,
+advances, and offsets. When changing layout, verify that measurement and paint
+use the same result and that no wrap or elision boundary splits a Parley
+cluster.

@@ -1,0 +1,42 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: MIT
+
+import "../fonts/NotoSansHebrew-ASCII-Embedded.ttf";
+
+export component AppWindow inherits Window {
+    in property <string> runtime-text;
+
+    width: 320px;
+    height: 240px;
+    background: #f7f8fa;
+    default-font-family: "Noto Sans Hebrew";
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 10px;
+
+        Text {
+            height: 100px;
+            font-family: "Noto Sans Hebrew";
+            font-size: 23px;
+            color: #18212b;
+            wrap: word-wrap;
+            overflow: elide;
+            max-lines: 3;
+            horizontal-alignment: start;
+            text: root.runtime-text;
+        }
+
+        Text {
+            height: 80px;
+            font-family: "Noto Sans Hebrew";
+            font-size: 21px;
+            color: #263f63;
+            wrap: word-wrap;
+            overflow: elide;
+            max-lines: 2;
+            horizontal-alignment: start;
+            text: "שָׁלוֹם 123 — dynamically shaped ASCII and Hebrew";
+        }
+    }
+}

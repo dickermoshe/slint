@@ -18,7 +18,7 @@ name = "slint-compiler"
 path = "main.rs"
 
 [features]
-renderer-software = ["i-slint-compiler/renderer-software"]
+renderer-software = ["i-slint-compiler/renderer-software-system-fonts"]
 image-default-formats = ["i-slint-compiler/image-default-formats"]
 jemalloc = ["dep:tikv-jemallocator"]
 sdf-fonts = ["renderer-software", "i-slint-compiler/sdf-fonts"]

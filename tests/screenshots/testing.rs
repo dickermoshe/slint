@@ -6,9 +6,9 @@
 use crossterm::style::Stylize;
 use i_slint_core::graphics::{Rgba8Pixel, SharedPixelBuffer};
 
-#[cfg(feature = "software")]
+#[cfg(any(feature = "software", feature = "software-embedded-ttf-only"))]
 pub use slint::platform::software_renderer::RenderingRotation;
-#[cfg(not(feature = "software"))]
+#[cfg(not(any(feature = "software", feature = "software-embedded-ttf-only")))]
 #[derive(Default, Copy, Clone, Eq, PartialEq, Debug)]
 pub enum RenderingRotation {
     #[default]

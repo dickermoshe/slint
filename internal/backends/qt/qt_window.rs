@@ -2876,7 +2876,7 @@ impl i_slint_core::renderer::RendererSealed for QtWindow {
         data: &'static [u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
         let ctx = self.slint_context().ok_or("slint platform not initialized")?;
-        ctx.font_context().borrow_mut().register_static_font(data);
+        ctx.font_context().borrow_mut().register_static_font(data)?;
         Ok(())
     }
 
