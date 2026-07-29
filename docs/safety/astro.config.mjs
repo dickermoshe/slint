@@ -15,6 +15,7 @@ import {
     SAFETY_DOCS_BASE_PATH,
 } from "./src/safety-site-config.mjs";
 import rehypeSlsIds from "@slint/common-files/src/utils/rehype-sls-ids.mjs";
+import remarkBaseLinks from "@slint/common-files/src/utils/remark-base-links.mjs";
 
 const _safetyOrigin = String(SAFETY_DOCS_BASE_URL).replace(/\/+$/, "");
 const _safetyAtRoot = SAFETY_DOCS_BASE_PATH === "/";
@@ -33,9 +34,10 @@ export default defineConfig({
     markdown: {
         // Only SC-covered content reaches this site's generated reference, so
         // every paragraph of it carries a traceability id.
+        remarkPlugins: [[remarkBaseLinks, { base: _safetyBase ?? "/" }]],
         rehypePlugins: [
             rehypeExternalLinksSlint,
-            [rehypeSlsIds, { generatedReferenceRequiresIds: true }],
+            [rehypeSlsIds, { referenceRequiresIds: true }],
         ],
     },
     integrations: [
@@ -52,7 +54,7 @@ export default defineConfig({
                 Header: "@slint/common-files/src/components/Header.astro",
                 Banner: "@slint/common-files/src/components/Banner.astro",
             },
-            plugins: [slintStarlightLinksValidatorPlugin({ errorOnRelativeLinks: false })],
+            plugins: [slintStarlightLinksValidatorPlugin({ errorOnRelativeLinks: true })],
             social: slintStarlightSocial,
             sidebar: [
                 { label: "Slint SC Safety Manual", slug: "index" },
@@ -113,9 +115,24 @@ export default defineConfig({
                         },
                         { label: "Rendering", slug: "reference/rendering" },
                         {
-                            autogenerate: {
-                                directory: "generated/reference",
-                            },
+                            label: "Elements",
+                            items: [
+                                { label: "Rectangle", slug: "reference/rectangle" },
+                                { label: "Window", slug: "reference/window" },
+                            ],
+                        },
+                        {
+                            label: "Property Types",
+                            items: [
+                                {
+                                    label: "Colors & Brushes",
+                                    slug: "reference/property-types/colors-and-brushes",
+                                },
+                                {
+                                    label: "Numeric Types",
+                                    slug: "reference/property-types/numeric-types",
+                                },
+                            ],
                         },
                     ],
                 },
@@ -166,8 +183,8 @@ export default defineConfig({
                             label: "File Structure",
                             slug: "language/file-structure",
                         },
-                        // The Imports chapter is marked notInSC; list it here
-                        // once imports come into the SC subset.
+                        // The Imports chapter isn't in the SC subset yet (no
+                        // `SC: true`); list it here once it joins.
                         {
                             label: "Exports",
                             slug: "language/exports",
@@ -183,10 +200,6 @@ export default defineConfig({
                         {
                             label: "Expressions",
                             slug: "language/expressions",
-                        },
-                        {
-                            label: "Types",
-                            slug: "language/types",
                         },
                         {
                             label: "Geometry",
